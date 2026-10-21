@@ -1,0 +1,10 @@
+#!/bin/sh
+set -e
+
+if ! id "liveuser" >/dev/null 2>&1; then
+    useradd -m -s /bin/bash -G sudo,adm,cdrom,plugdev,netdev liveuser
+    passwd -d liveuser
+fi
+
+echo "liveuser ALL=(ALL:ALL) NOPASSWD:ALL" > /etc/sudoers.d/liveuser
+chmod 0440 /etc/sudoers.d/liveuser

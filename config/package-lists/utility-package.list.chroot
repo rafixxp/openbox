@@ -1,0 +1,13 @@
+linux-image-amd64
+grub-pc
+grub-efi-amd64
+initramfs-tools
+rsync
+parted
+fdisk
+e2fsprogs
+util-linux
+iproute2
+isc-dhcp-client
+openssh-server
+curl

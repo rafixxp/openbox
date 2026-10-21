@@ -1,0 +1,39 @@
+#!/bin/bash
+
+# Warna ANSI
+GREEN='\033[0;32m'
+CYAN='\033[0;36m'
+YELLOW='\033[1;33m'
+BLUE='\033[0;34m'
+RED='\033[0;31m'
+NC='\033[0m' # No Color
+
+# Ambil Informasi Sistem
+HOSTNAME=$(hostname)
+KERNEL=$(uname -r)
+UPTIME=$(uptime -p | sed 's/up //')
+RAM_USAGE=$(free -m | awk '/Mem:/ { printf "%sMB / %sMB (%.2f%%)", $3, $2, $3/$2*100 }')
+CPU_LOAD=$(top -bn1 | grep "Cpu(s)" | awk '{print $2 + $4"%"}')
+DISK_USAGE=$(df -h / | awk 'NR==2 {print $3 " / " $2 " (" $5 ")"}')
+
+echo -e "${CYAN}"
+cat << "EOF"
+  ██████╗ ██████╗ ███████╗███╗   ██╗██████╗  ██████╗ ██╗  ██╗
+ ██╔═══██╗██╔══██╗██╔════╝████╗  ██║██╔══██╗██╔═══██╗╚██╗██╔╝
+ ██║   ██║██████╔╝█████╗  ██╔██╗ ██║██████╔╝██║   ██║ ╚███╔╝ 
+ ██║   ██║██╔═══╝ ██╔══╝  ██║╚██╗██║██╔══██╗██║   ██║ ██╔██╗ 
+ ╚██████╔╝██║     ███████╗██║ ╚████║██████╔╝╚██████╔╝██╔╝ ██╗
+  ╚═════╝ ╚═╝     ╚══════╝╚═╝  ╚═══╝╚═════╝  ╚═════╝ ╚═╝  ╚═╝
+EOF
+echo -e "${NC}"
+echo -e "${YELLOW}==============================================================${NC}"
+echo -e "  ${GREEN}OS:${NC} Openbox Server Minimalist (Debian Bookworm)"
+echo -e "  ${GREEN}Host:${NC} $HOSTNAME \t\t ${GREEN}Kernel:${NC} $KERNEL"
+echo -e "  ${GREEN}Uptime:${NC} $UPTIME"
+echo -e "  ${GREEN}Memory:${NC} $RAM_USAGE"
+echo -e "  ${GREEN}CPU Load:${NC} $CPU_LOAD \t\t ${GREEN}Disk (/):${NC} $DISK_USAGE"
+echo -e "${YELLOW}==============================================================${NC}"
+echo -e "  ${RED}Petunjuk:${NC}"
+echo -e "  Ketik ${CYAN}openbox-install${NC} untuk menginstal distro ini ke disk."
+echo -e "${YELLOW}==============================================================${NC}"
+echo ""
