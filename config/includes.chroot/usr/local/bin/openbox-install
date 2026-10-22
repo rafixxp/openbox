@@ -1,17 +1,54 @@
 #!/bin/bash
 
+# Pastikan dijalankan sebagai root
 if [ "$EUID" -ne 0 ]; then
   echo "[-] Error: Script ini harus dijalankan sebagai root!"
   exit 1
 fi
 
 clear
-echo "=================================================="
-echo "Openbox - Setup Installer "
-echo "=================================================="
+
+# Banner ASCII Openbox (Biar estetik ala distro custom)
+echo -e "\033[0;36m"
+cat << "EOF"
+  ██████╗ ██████╗ ███████╗███╗   ██╗██████╗  ██████╗ ██╗  ██╗
+ ██╔═══██╗██╔══██╗██╔════╝████╗  ██║██╔══██╗██╔═══██╗╚██╗██╔╝
+ ██║   ██║██████╔╝█████╗  ██╔██╗ ██║██████╔╝██║   ██║ ╚███╔╝ 
+ ██║   ██║██╔═══╝ ██╔══╝  ██║╚██╗██║██╔══██╗██║   ██║ ██╔██╗ 
+ ╚██████╔╝██║     ███████╗██║ ╚████║██████╔╝╚██████╔╝██╔╝ ██╗
+  ╚═════╝ ╚═╝     ╚══════╝╚═╝  ╚═══╝╚═════╝  ╚═════╝ ╚═╝  ╚═╝
+EOF
+echo -e "\033[0m"
+echo "==============================================================="
+echo "Openbox Setup Installer							             "
+echo "==============================================================="
 echo ""
 
-# 1. Deteksi Disk yang Tersedia
+# 1. Konfigurasi User & Timezone Terlebih Dahulu
+echo "[*] Konfigurasi Awal Sistem:"
+read -p "Masukkan Timezone (contoh: Asia/Jakarta) [Default: Asia/Jakarta]: " TIMEZONE
+TIMEZONE=${TIMEZONE:-Asia/Jakarta}
+
+read -p "Masukkan Username baru untuk login: " NEW_USER
+if [ -z "$NEW_USER" ]; then
+  echo "[-] Error: Username tidak boleh kosong!"
+  exit 1
+fi
+
+read -s -p "Masukkan Password untuk $NEW_USER: " NEW_PASS
+echo ""
+read -s -p "Konfirmasi Password: " NEW_PASS_CONFIRM
+echo ""
+
+if [ "$NEW_PASS" != "$NEW_PASS_CONFIRM" ]; then
+  echo "[-] Error: Password tidak cocok!"
+  exit 1
+fi
+
+read -p "Aktifkan autologin otomatis untuk user $NEW_USER? (y/n): " AUTO_LOGIN
+
+echo ""
+# 2. Deteksi Disk yang Tersedia
 echo "[*] Daftar Disk yang Tersedia di Sistem:"
 lsblk -d -o NAME,SIZE,MODEL
 echo ""
@@ -54,7 +91,6 @@ mkdir -p /mnt
 mount "$PARTITION" /mnt
 
 echo "[*] [4/6] Menyalin seluruh Root Filesystem ke disk target..."
-# Menggunakan rsync untuk kloning sistem yang sedang berjalan
 rsync -aAXv / /mnt --exclude={"/dev/*","/proc/*","/sys/*","/tmp/*","/run/*","/mnt/*","/media/*","/lost+found"}
 
 echo "[*] [5/6] Menyiapkan direktori virtual dan /etc/fstab..."
@@ -64,12 +100,35 @@ mkdir -p /mnt/dev /mnt/proc /mnt/sys /mnt/tmp /mnt/run
 UUID=$(blkid -s UUID -o value "$PARTITION")
 echo "UUID=$UUID / ext4 errors=remount-ro 0 1" > /mnt/etc/fstab
 
-echo "[*] [6/6] Melakukan Chroot untuk update initramfs dan pasang GRUB..."
+echo "[*] [6/6] Melakukan Chroot untuk konfigurasi sistem, initramfs, dan GRUB..."
 mount --bind /dev /mnt/dev
 mount --bind /proc /mnt/proc
 mount --bind /sys /mnt/sys
 
 chroot /mnt /bin/bash <<EOF
+# Set Timezone
+ln -sf /usr/share/zoneinfo/$TIMEZONE /etc/localtime
+dpkg-reconfigure -f noninteractive tzdata
+
+# Buat User Baru & Tambahkan ke Grup Sudo
+useradd -m -s /bin/bash -G sudo,adm,cdrom,plugdev,netdev "$NEW_USER"
+echo "$NEW_USER:$NEW_PASS" | chpasswd
+
+# Konfigurasi Sudoers tanpa password
+mkdir -p /etc/sudoers.d
+echo "$NEW_USER ALL=(ALL:ALL) NOPASSWD:ALL" > /etc/sudoers.d/$NEW_USER
+chmod 0440 /etc/sudoers.d/$NEW_USER
+
+# Konfigurasi Autologin jika dipilih 'y'
+if [ "$AUTO_LOGIN" = "y" ]; then
+    mkdir -p /etc/systemd/system/getty@tty1.service.d
+    cat <<EOT > /etc/systemd/system/getty@tty1.service.d/autologin.conf
+[Service]
+ExecStart=
+ExecStart=-/sbin/agetty --autologin "$NEW_USER" --noclear %I \$TERM
+EOT
+fi
+
 update-initramfs -u -k all
 grub-install "$TARGET"
 update-grub

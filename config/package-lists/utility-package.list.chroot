@@ -1,6 +1,5 @@
 linux-image-amd64
 grub-pc
-grub-efi-amd64
 initramfs-tools
 rsync
 parted
@@ -11,3 +10,5 @@ iproute2
 isc-dhcp-client
 openssh-server
 curl
+sudo
+zstd

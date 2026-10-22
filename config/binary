@@ -7,10 +7,10 @@ LB_IMAGE_TYPE="iso-hybrid"
 LB_BINARY_FILESYSTEM="fat32"
 
 # Set apt/aptitude generic indices
-LB_APT_INDICES="true"
+LB_APT_INDICES="false"
 
 # Set boot parameters
-LB_BOOTAPPEND_LIVE="boot=live username=liveuser hostname=openbox"
+LB_BOOTAPPEND_LIVE="boot=live components"
 
 # Set boot parameters
 LB_BOOTAPPEND_INSTALL=""
@@ -22,10 +22,10 @@ LB_BOOTAPPEND_LIVE_FAILSAFE="boot=live components memtest noapic noapm nodma nom
 LB_BOOTLOADER_BIOS="syslinux"
 
 # Set EFI bootloader
-LB_BOOTLOADER_EFI="grub-efi"
+LB_BOOTLOADER_EFI=""
 
 # Set bootloaders
-LB_BOOTLOADERS=""
+LB_BOOTLOADERS="syslinux"
 
 # Set checksums
 LB_CHECKSUMS="sha256"
@@ -80,7 +80,7 @@ LB_ISO_PREPARER="live-build @LB_VERSION@; https://salsa.debian.org/live-team/liv
 LB_ISO_PUBLISHER="Debian Live project; https://wiki.debian.org/DebianLive; debian-live@lists.debian.org"
 
 # Set iso volume (max 32 chars)
-LB_ISO_VOLUME="Debian bookworm @ISOVOLUME_TS@"
+LB_ISO_VOLUME="Openbox"
 
 # Set jffs2 eraseblock size
 LB_JFFS2_ERASEBLOCK=""
@@ -107,7 +107,7 @@ LB_ONIE_KERNEL_CMDLINE=""
 LB_FIRMWARE_BINARY="true"
 
 # Set inclusion of firmware packages in the live image
-LB_FIRMWARE_CHROOT="true"
+LB_FIRMWARE_CHROOT="false"
 
 # Set swap file path
 LB_SWAP_FILE_PATH=""
