@@ -1,5 +1,8 @@
 linux-image-amd64
-grub-pc
+grub-efi-amd64
+grub-efi-amd64-bin
+grub-pc-bin
+grub-common
 initramfs-tools
 rsync
 parted
@@ -12,3 +15,4 @@ openssh-server
 curl
 sudo
 zstd
+whiptail

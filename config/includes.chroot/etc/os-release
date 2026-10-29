@@ -1,0 +1,10 @@
+PRETTY_NAME="Openbox 1.0"
+NAME="Openbox"
+VERSION_ID="1.0"
+VERSION="1.0 (Trixie)"
+VERSION_CODENAME=trixie
+ID=openbox
+ID_LIKE=debian
+HOME_URL="https://github.com/rafixxp/openbox"
+SUPPORT_URL="https://github.com/rafixxp/openbox/issues"
+BUG_REPORT_URL="https://github.com/rafixxp/openbox/issues"
