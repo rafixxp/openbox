@@ -16,3 +16,4 @@ curl
 sudo
 zstd
 whiptail
+dosfstools
