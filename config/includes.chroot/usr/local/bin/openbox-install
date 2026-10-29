@@ -1,34 +1,32 @@
 #!/bin/bash
 
 # ============================================================
-#  OPENBOX TUI INSTALLER — whiptail edition
-#  Requires: bash, whiptail, parted, rsync, blkid
+#  OPENBOX TUI INSTALLER — whiptail edition (fixed)
+#  Requires: bash, whiptail, parted, rsync, blkid, mkfs.*, wipefs
 # ============================================================
 
 [ "$EUID" -ne 0 ] && echo "[-] Harus dijalankan sebagai root!" && exit 1
 
-command -v whiptail &>/dev/null || {
-  echo "[-] whiptail tidak ditemukan. Install dulu: apt install whiptail"
-  exit 1
-}
+for cmd in whiptail parted rsync blkid wipefs mkfs.ext4 mkfs.vfat lsblk partprobe; do
+  command -v "$cmd" &>/dev/null || {
+    echo "[-] Perintah '$cmd' tidak ditemukan. Install dulu paket yang menyediakannya."
+    exit 1
+  }
+done
 
 # ── Ukuran terminal & dialog dinamis ─────────────────────
-TERM_H=$(tput lines  2>/dev/null || echo 24)
-TERM_W=$(tput cols   2>/dev/null || echo 80)
+TERM_H=$(tput lines 2>/dev/null || echo 24)
+TERM_W=$(tput cols  2>/dev/null || echo 80)
 
-# Dialog tidak boleh lebih besar dari terminal
 MAX_DH=$(( TERM_H - 2 ))
-MAX_DW=$(( TERM_W - 4 ))
 
-# Lebar dialog default (maks 76, min 60)
 DW=$(( TERM_W - 8 ))
 [ "$DW" -gt 76 ] && DW=76
 [ "$DW" -lt 60 ] && DW=60
 
 TITLE="Openbox Installer"
 
-# ── Helper: hitung tinggi dialog agar konten vertikal center ─
-# $1 = jumlah baris konten, $2 = overhead (judul+border+tombol = biasanya 6)
+# ── Helper: tinggi dialog ────────────────────────────────
 dialog_h() {
   local content_lines=$1
   local overhead=${2:-6}
@@ -38,9 +36,7 @@ dialog_h() {
   echo "$dh"
 }
 
-# ── Helper: padding horizontal — center teks dalam lebar DW ──
-# Whiptail memiliki ~2 char border kiri+kanan, sisa = DW-4 untuk konten
-# Fungsi ini menghasilkan string dengan spasi kiri agar teks di tengah
+# ── Helper: center teks horizontal ───────────────────────
 center_line() {
   local text="$1"
   local inner=$(( DW - 4 ))
@@ -50,36 +46,17 @@ center_line() {
   printf "%${pad}s%s" "" "$text"
 }
 
-# ── Helper: baris kosong sejumlah $1 sebagai string \n ───────
+# ── Helper: N baris kosong (literal \n) ──────────────────
 vpad() {
-  local n=$1
-  local s=""
+  local n=$1 s="" i
   for (( i=0; i<n; i++ )); do s="${s}\n"; done
   printf "%s" "$s"
 }
 
-# ── Helper: error & exit ─────────────────────────────────────
-die() {
-  local msg="$1"
-  local dh; dh=$(dialog_h 3)
-  whiptail --title "Error" --msgbox "\n$msg" "$dh" "$DW"
-  exit 1
-}
-
-# ── Helper: infobox ──────────────────────────────────────────
-infobox() {
-  local msg="$1"
-  local dh; dh=$(dialog_h 3)
-  whiptail --title "$TITLE" --infobox "\n$msg" "$dh" "$DW"
-}
-
-# ── Helper: buat konten yang dipadding vertikal ───────────────
-# Menambah baris kosong di atas/bawah konten agar terasa center
-# $1=string konten (sudah mengandung \n), $2=tinggi inner yg diinginkan
+# ── Helper: center vertikal ──────────────────────────────
 vcentered() {
   local body="$1"
   local target_h=${2:-10}
-  # Hitung baris body
   local body_lines
   body_lines=$(echo -e "$body" | wc -l)
   local vspace=$(( (target_h - body_lines) / 2 ))
@@ -88,26 +65,36 @@ vcentered() {
   printf "%s%s%s" "$pad" "$body" "$pad"
 }
 
-# ============================================================
-# SPLASH SCREEN — center vertikal & horizontal
-# ============================================================
-BANNER_W=42   # lebar teks ascii art
+# ── Helper: error & exit ─────────────────────────────────
+die() {
+  local msg="$1"
+  local dh; dh=$(dialog_h 3)
+  whiptail --title "Error" --msgbox "\n$msg" "$dh" "$DW"
+  exit 1
+}
 
-# Hitung padding kiri banner agar center di dalam DW
-BANNER_PAD=$(( (DW - 4 - BANNER_W) / 2 ))
-[ "$BANNER_PAD" -lt 0 ] && BANNER_PAD=0
-BP=$(printf "%${BANNER_PAD}s" "")
+# ── Helper: infobox ──────────────────────────────────────
+infobox() {
+  local msg="$1"
+  local dh; dh=$(dialog_h 3)
+  whiptail --title "$TITLE" --infobox "\n$msg" "$dh" "$DW"
+}
 
-# Konten splash
+# ── Helper: unmount semua yang ter-mount di /mnt ─────────
+cleanup_mounts() {
+  sync
+  umount -R /mnt 2>/dev/null || umount -R -l /mnt 2>/dev/null
+}
+
+# ============================================================
+# SPLASH SCREEN
+# ============================================================
 SPLASH_BODY="\
-${BP}  ___  ____  _____ _   _ ____   _____  __
-${BP} / _ \\|  _ \\| ____| \\ | | __ ) / _ \\ \\/ /
-${BP}| | | | |_) |  _| |  \\| |  _ \\| | | \\  /
-${BP}| |_| |  __/| |___| |\\  | |_) | |_| /  \\
-${BP} \\___/|_|   |_____|_| \\_|____/ \\___/_/\\_\\
+$(center_line "+--------------------------------------+")\n\
+$(center_line "|         OPENBOX  INSTALLER           |")\n\
+$(center_line "+--------------------------------------+")\n\
 \n\
 $(center_line "Openbox Setup Installer — TUI Edition")\n\
-$(center_line "======================================")\n\
 \n\
 $(center_line "Installer ini akan memandu kamu menyalin")\n\
 $(center_line "sistem ke disk target dan mengatur GRUB.")\n\
@@ -115,9 +102,7 @@ $(center_line "sistem ke disk target dan mengatur GRUB.")\n\
 $(center_line "Pastikan disk target sudah terpasang")\n\
 $(center_line "sebelum melanjutkan.")"
 
-SPLASH_LINES=13
-SPLASH_H=$(dialog_h $SPLASH_LINES 7)
-
+SPLASH_H=$(dialog_h 11 7)
 whiptail --title "$TITLE" \
   --msgbox "$(vcentered "$SPLASH_BODY" $(( SPLASH_H - 7 )))" \
   "$SPLASH_H" "$DW"
@@ -142,7 +127,7 @@ $(center_line "[ $BOOT_MODE ]")\n\
 $(center_line "Pastikan GRUB yang akan dipasang")\n\
 $(center_line "sesuai dengan mode ini.")"
 
-BH=$(dialog_h 8 6)
+BH=$(dialog_h 6 6)
 whiptail --title "$TITLE" \
   --msgbox "$(vcentered "$BOOT_BODY" $(( BH - 6 )))" \
   "$BH" "$DW"
@@ -150,33 +135,40 @@ whiptail --title "$TITLE" \
 # ============================================================
 # [2] TIMEZONE
 # ============================================================
-TZ_H=$(dialog_h 5 8)
-TIMEZONE=$(whiptail --title "$TITLE" \
-  --inputbox "\n$(center_line "Masukkan timezone sistem:")\n$(center_line "(contoh: Asia/Jakarta, Asia/Makassar, UTC)")\n" \
-  "$TZ_H" "$DW" "Asia/Jakarta" \
-  3>&1 1>&2 2>&3) || exit 0
+while true; do
+  TZ_H=$(dialog_h 4 7)
+  TIMEZONE=$(whiptail --title "$TITLE" \
+    --inputbox "\n$(center_line "Masukkan timezone sistem:")\n$(center_line "(contoh: Asia/Jakarta, Asia/Makassar, UTC)")\n" \
+    "$TZ_H" "$DW" "Asia/Jakarta" \
+    3>&1 1>&2 2>&3) || exit 0
 
-[ -z "$TIMEZONE" ] && TIMEZONE="Asia/Jakarta"
+  [ -z "$TIMEZONE" ] && TIMEZONE="Asia/Jakarta"
 
-if [ ! -f "/usr/share/zoneinfo/$TIMEZONE" ]; then
-  TZW_H=$(dialog_h 4 6)
-  whiptail --title "Peringatan" \
-    --yesno "\n$(center_line "Timezone '$TIMEZONE' tidak ditemukan.")\n$(center_line "Lanjutkan tetap dengan nilai ini?")\n" \
-    "$TZW_H" "$DW" || exit 0
-fi
+  if [ -f "/usr/share/zoneinfo/$TIMEZONE" ]; then
+    break
+  fi
+
+  TZW_H=$(dialog_h 3 6)
+  if whiptail --title "Peringatan" \
+      --yesno "\n$(center_line "Timezone '$TIMEZONE' tidak ditemukan.")\n$(center_line "Tetap gunakan nilai ini?")\n" \
+      "$TZW_H" "$DW"; then
+    break
+  fi
+done
 
 # ============================================================
 # [3] USERNAME
 # ============================================================
 while true; do
-  UN_H=$(dialog_h 3 8)
+  UN_H=$(dialog_h 3 7)
   NEW_USER=$(whiptail --title "$TITLE" \
     --inputbox "\n$(center_line "Masukkan nama pengguna baru:")\n" \
     "$UN_H" "$DW" "" \
     3>&1 1>&2 2>&3) || exit 0
 
   if [ -z "$NEW_USER" ]; then
-    EH=$(dialog_h 2 6); whiptail --title "Error" --msgbox "\n$(center_line "Username tidak boleh kosong!")\n" "$EH" "$DW"
+    EH=$(dialog_h 2 6)
+    whiptail --title "Error" --msgbox "\n$(center_line "Username tidak boleh kosong!")\n" "$EH" "$DW"
     continue
   fi
 
@@ -195,24 +187,24 @@ done
 # [4] PASSWORD
 # ============================================================
 while true; do
-  PH=$(dialog_h 3 8)
-  NEW_PASS=$(whiptail --title "$TITLE" \
-    --passwordbox "\n$(center_line "Masukkan password untuk '$NEW_USER':")\n" \
-    "$PH" "$DW" \
-    3>&1 1>&2 2>&3) || exit 0
+  PH=$(dialog_h 3 7)
+  NEW_PASS=$(whiptail --title "$TITLE" --passwordbox \
+    "\n$(center_line "Masukkan password untuk '$NEW_USER':")\n" \
+    "$PH" "$DW" 3>&1 1>&2 2>&3) || exit 0
 
-  NEW_PASS_CONFIRM=$(whiptail --title "$TITLE" \
-    --passwordbox "\n$(center_line "Konfirmasi password:")\n" \
-    "$PH" "$DW" \
-    3>&1 1>&2 2>&3) || exit 0
+  NEW_PASS_CONFIRM=$(whiptail --title "$TITLE" --passwordbox \
+    "\n$(center_line "Konfirmasi password:")\n" \
+    "$PH" "$DW" 3>&1 1>&2 2>&3) || exit 0
 
   if [ -z "$NEW_PASS" ]; then
-    EH=$(dialog_h 2 6); whiptail --title "Error" --msgbox "\n$(center_line "Password tidak boleh kosong!")\n" "$EH" "$DW"
+    EH=$(dialog_h 2 6)
+    whiptail --title "Error" --msgbox "\n$(center_line "Password tidak boleh kosong!")\n" "$EH" "$DW"
     continue
   fi
 
   if [ "$NEW_PASS" != "$NEW_PASS_CONFIRM" ]; then
-    EH=$(dialog_h 2 6); whiptail --title "Error" --msgbox "\n$(center_line "Password tidak cocok, coba lagi!")\n" "$EH" "$DW"
+    EH=$(dialog_h 2 6)
+    whiptail --title "Error" --msgbox "\n$(center_line "Password tidak cocok, coba lagi!")\n" "$EH" "$DW"
     continue
   fi
 
@@ -229,7 +221,7 @@ done
 # ============================================================
 # [5] AUTOLOGIN
 # ============================================================
-AH=$(dialog_h 3 6)
+AH=$(dialog_h 2 6)
 AUTO_LOGIN="n"
 if whiptail --title "$TITLE" \
    --yesno "\n$(center_line "Aktifkan autologin untuk '$NEW_USER' ke TTY1?")\n" \
@@ -238,22 +230,35 @@ if whiptail --title "$TITLE" \
 fi
 
 # ============================================================
+# [5b] WEB PANEL (ditanyakan di awal, dipasang saat boot pertama)
+# ============================================================
+WP_H=$(dialog_h 6 6)
+WP_CHOICE=$(whiptail --title "$TITLE" \
+  --menu "\n$(center_line "Instalasi Web Panel (opsional)")\n$(center_line "aaPanel dipasang otomatis saat boot pertama")\n$(center_line "(butuh koneksi internet).")\n" \
+  "$WP_H" "$DW" 2 \
+  "2" "Lewati / tanpa web panel" \
+  "1" "aaPanel" \
+  3>&1 1>&2 2>&3) || exit 0
+[ "$WP_CHOICE" = "1" ] && WP_NAME="aaPanel" || WP_NAME="-"
+
+# ============================================================
 # [6] PILIH DISK TARGET
 # ============================================================
 DISK_LIST=()
 while IFS= read -r line; do
+  [ -z "$line" ] && continue
   NAME=$(echo "$line" | awk '{print $1}')
   SIZE=$(echo "$line" | awk '{print $2}')
   MODEL=$(echo "$line" | awk '{$1=$2=""; print $0}' | xargs)
   [ -z "$MODEL" ] && MODEL="(no model)"
   DISK_LIST+=("/dev/$NAME" "$SIZE  $MODEL")
-done < <(lsblk -d -o NAME,SIZE,MODEL --noheadings | grep -v "^loop")
+done < <(lsblk -d -n -e 7,11 -o NAME,SIZE,MODEL)
 
 [ ${#DISK_LIST[@]} -eq 0 ] && die "Tidak ada disk yang terdeteksi!"
 
 NDISK=$(( ${#DISK_LIST[@]} / 2 ))
 MENU_INNER=$(( NDISK > 6 ? 6 : NDISK ))
-MENU_H=$(dialog_h $(( MENU_INNER + 5 )) 6)
+MENU_H=$(dialog_h $(( MENU_INNER + 4 )) 6)
 
 TARGET=$(whiptail --title "$TITLE" \
   --menu "\n$(center_line "Pilih disk target instalasi:")\n$(center_line "!! SEMUA DATA DI DISK TERPILIH AKAN DIHAPUS !!")\n" \
@@ -264,12 +269,15 @@ TARGET=$(whiptail --title "$TITLE" \
 [ ! -b "$TARGET" ] && die "Disk $TARGET tidak ditemukan atau tidak valid."
 TARGET_DISK=$(basename "$TARGET")
 
+# Tolak disk yang sedang dipakai (misalnya media live / root saat ini)
+if lsblk -nr -o MOUNTPOINT "$TARGET" | grep -q '[^[:space:]]'; then
+  die "$(center_line "Disk $TARGET sedang ter-mount / dipakai sistem.")\n$(center_line "Pilih disk lain (bukan media instalasi).")"
+fi
+
 # ============================================================
 # [7] RINGKASAN & KONFIRMASI AKHIR
 # ============================================================
-DISK_INFO=$(lsblk -d -o SIZE,MODEL "$TARGET" --noheadings | head -1 | xargs)
-
-# Lebar kolom label dan nilai
+DISK_INFO=$(lsblk -d -n -o SIZE,MODEL "$TARGET" | head -1 | xargs)
 LBL="  %-12s: %s"
 
 SUM_BODY="\
@@ -280,6 +288,7 @@ $(printf "$LBL" "Mode Boot"  "$BOOT_MODE")\n\
 $(printf "$LBL" "Timezone"   "$TIMEZONE")\n\
 $(printf "$LBL" "Username"   "$NEW_USER")\n\
 $(printf "$LBL" "Autologin"  "$AUTO_LOGIN")\n\
+$(printf "$LBL" "Web Panel"  "$WP_NAME")\n\
 $(printf "$LBL" "Disk"       "$TARGET")\n\
 $(printf "$LBL" "Disk Info"  "$DISK_INFO")\n\
 \n\
@@ -290,7 +299,6 @@ whiptail --title "Ringkasan Instalasi" \
   --msgbox "$(vcentered "$SUM_BODY" $(( SH - 6 )))" \
   "$SH" "$DW"
 
-# -- Konfirmasi destruktif --
 WARN_BODY="\
 $(center_line "!! PERINGATAN: OPERASI DESTRUKTIF !!")\n\
 \n\
@@ -303,15 +311,13 @@ $(center_line "setelah proses dimulai.")\n\
 \n\
 $(center_line "Apakah kamu yakin ingin melanjutkan?")"
 
-WBH=$(dialog_h 11 6)
-whiptail --title "!!! KONFIRMASI AKHIR !!!" \
+WBH=$(dialog_h 9 6)
+whiptail --title "!!! KONFIRMASI AKHIR !!!" --defaultno \
   --yesno "$(vcentered "$WARN_BODY" $(( WBH - 6 )))" \
   "$WBH" "$DW" \
   || { DH=$(dialog_h 2 6)
        whiptail --title "$TITLE" --msgbox "\n$(center_line "Instalasi dibatalkan.")\n" "$DH" "$DW"
        exit 0; }
-
-
 
 # ============================================================
 # [8] NAMA PARTISI
@@ -326,6 +332,9 @@ else
   BIOS_ROOT_PART="${TARGET}1"
 fi
 
+if [ "$IS_UEFI" -eq 1 ]; then TARGET_ROOT_PART="$ROOT_PART"
+else TARGET_ROOT_PART="$BIOS_ROOT_PART"; fi
+
 GW="$DW"
 GH=$(dialog_h 1 6)
 
@@ -335,28 +344,35 @@ GH=$(dialog_h 1 6)
 
 # ── Tahap 1: Partisi ─────────────────────────────────────
 {
-  wipefs -a "$TARGET" &>/dev/null; echo 20
+  echo 10; wipefs -a "$TARGET" &>/dev/null; echo 25
   if [ "$IS_UEFI" -eq 1 ]; then
-    parted -s "$TARGET" mklabel gpt            &>/dev/null; echo 40
-    parted -s "$TARGET" mkpart ESP fat32 1MiB 513MiB &>/dev/null; echo 65
-    parted -s "$TARGET" set 1 esp on           &>/dev/null; echo 80
-    parted -s "$TARGET" mkpart primary ext4 513MiB 100% &>/dev/null
+    parted -s "$TARGET" mklabel gpt                        &>/dev/null; echo 40
+    parted -s "$TARGET" mkpart ESP fat32 1MiB 513MiB       &>/dev/null; echo 55
+    parted -s "$TARGET" set 1 esp on                       &>/dev/null; echo 70
+    parted -s "$TARGET" mkpart primary ext4 513MiB 100%    &>/dev/null
   else
-    parted -s "$TARGET" mklabel msdos          &>/dev/null; echo 50
-    parted -s "$TARGET" mkpart primary ext4 1MiB 100% &>/dev/null; echo 80
-    parted -s "$TARGET" set 1 boot on          &>/dev/null
+    parted -s "$TARGET" mklabel msdos                      &>/dev/null; echo 50
+    parted -s "$TARGET" mkpart primary ext4 1MiB 100%      &>/dev/null; echo 70
+    parted -s "$TARGET" set 1 boot on                      &>/dev/null
   fi
+  echo 85
+  partprobe "$TARGET" &>/dev/null
+  udevadm settle      &>/dev/null
+  sleep 2
   echo 100
 } | whiptail --title "$TITLE" --gauge \
     "$(center_line "[1/6] Membuat tabel partisi...")" \
     "$GH" "$GW" 0
 
+[ -b "$TARGET_ROOT_PART" ] || die "Partisi $TARGET_ROOT_PART tidak terbentuk. Pembuatan partisi gagal."
+[ "$IS_UEFI" -eq 1 ] && { [ -b "$EFI_PART" ] || die "Partisi EFI $EFI_PART tidak terbentuk."; }
+
 # ── Tahap 2: Format ───────────────────────────────────────
 {
   echo 10
   if [ "$IS_UEFI" -eq 1 ]; then
-    mkfs.vfat -F32 "$EFI_PART"    &>/dev/null; echo 50
-    mkfs.ext4 -F   "$ROOT_PART"   &>/dev/null
+    mkfs.vfat -F32 "$EFI_PART"  &>/dev/null; echo 50
+    mkfs.ext4 -F   "$ROOT_PART" &>/dev/null
   else
     mkfs.ext4 -F   "$BIOS_ROOT_PART" &>/dev/null
   fi
@@ -365,23 +381,18 @@ GH=$(dialog_h 1 6)
     "$(center_line "[2/6] Memformat partisi...")" \
     "$GH" "$GW" 0
 
-if [ "$IS_UEFI" -eq 1 ]; then TARGET_ROOT_PART="$ROOT_PART"
-else TARGET_ROOT_PART="$BIOS_ROOT_PART"; fi
-
 # ── Tahap 3: Mount ────────────────────────────────────────
 infobox "$(center_line "[3/6] Mounting partisi ke /mnt...")"
 mkdir -p /mnt
-mount "$TARGET_ROOT_PART" /mnt  || die "Gagal mount $TARGET_ROOT_PART ke /mnt"
+mount "$TARGET_ROOT_PART" /mnt || die "Gagal mount $TARGET_ROOT_PART ke /mnt"
 if [ "$IS_UEFI" -eq 1 ]; then
   mkdir -p /mnt/boot/efi
-  mount "$EFI_PART" /mnt/boot/efi || die "Gagal mount EFI partition"
+  mount "$EFI_PART" /mnt/boot/efi || { cleanup_mounts; die "Gagal mount partisi EFI"; }
 fi
 
 # ── Tahap 4: Hitung + salin filesystem ───────────────────
 infobox "$(center_line "[4/6] Menghitung file yang akan disalin...")"
 
-# Array exclude — brace expansion TIDAK bekerja dalam variabel string biasa,
-# harus pakai array agar setiap --exclude di-pass sebagai argumen terpisah
 RSYNC_EXCL=(
   --exclude='/dev/*'
   --exclude='/proc/*'
@@ -390,59 +401,76 @@ RSYNC_EXCL=(
   --exclude='/run/*'
   --exclude='/mnt/*'
   --exclude='/media/*'
+  --exclude='/cdrom/*'
+  --exclude='/boot/efi/*'
   --exclude='/lost+found'
+  --exclude='/swapfile'
+  --exclude='/swap.img'
 )
 
-TOTAL_FILES=$(rsync -aAXn "${RSYNC_EXCL[@]}" / /mnt 2>/dev/null | wc -l)
-[ "$TOTAL_FILES" -eq 0 ] && TOTAL_FILES=1
+TOTAL_FILES=$(rsync -aAXn --info=name "${RSYNC_EXCL[@]}" / /mnt 2>/dev/null | wc -l)
+[ "$TOTAL_FILES" -lt 1 ] && TOTAL_FILES=1
 
-# Jalankan rsync ke file sementara agar exit code bisa dicek di luar subshell
 RSYNC_LOG=$(mktemp)
+RSYNC_RC=$(mktemp)
+echo 0 > "$RSYNC_RC"
 (
   COPIED=0
-  rsync -aAX "${RSYNC_EXCL[@]}" --info=name / /mnt 2>"$RSYNC_LOG" | \
+  LAST=-1
+  rsync -aAX --info=name "${RSYNC_EXCL[@]}" / /mnt 2>"$RSYNC_LOG" | \
   while IFS= read -r _; do
-    ((COPIED++))
+    COPIED=$(( COPIED + 1 ))
     PCT=$(( COPIED * 100 / TOTAL_FILES ))
     [ "$PCT" -gt 99 ] && PCT=99
-    echo "$PCT"
+    if [ "$PCT" -ne "$LAST" ]; then
+      echo "$PCT"
+      LAST=$PCT
+    fi
   done
+  echo "${PIPESTATUS[0]}" > "$RSYNC_RC"
   echo 100
 ) | whiptail --title "$TITLE" --gauge \
     "$(center_line "[4/6] Menyalin root filesystem (~$TOTAL_FILES item)...")" \
     "$GH" "$GW" 0
 
-# Verifikasi: /mnt/bin/bash harus ada sebelum lanjut ke chroot
+RC=$(cat "$RSYNC_RC" 2>/dev/null); RC=${RC:-1}
+rm -f "$RSYNC_RC"
+
 BASH_PATH=""
 if   [ -f "/mnt/bin/bash" ];     then BASH_PATH="/mnt/bin/bash"
 elif [ -f "/mnt/usr/bin/bash" ]; then BASH_PATH="/mnt/usr/bin/bash"
 fi
 
-if [ -z "$BASH_PATH" ]; then
-  RSYNC_ERR=$(cat "$RSYNC_LOG" 2>/dev/null | head -10 | sed 's/[^[:print:]\t]//g')
+# rsync exit 23/24 = sebagian file gagal/hilang saat disalin (umum di live system)
+if [ -z "$BASH_PATH" ] || { [ "$RC" -ne 0 ] && [ "$RC" -ne 23 ] && [ "$RC" -ne 24 ]; }; then
+  RSYNC_ERR=$(head -10 "$RSYNC_LOG" 2>/dev/null | sed 's/[^[:print:]\t]//g')
   rm -f "$RSYNC_LOG"
   EH=$(( MAX_DH > 18 ? 18 : MAX_DH ))
+  cleanup_mounts
   whiptail --title "Rsync Gagal" --scrolltext \
-    --msgbox "Filesystem tidak tersalin dengan benar.\n/mnt/bin/bash tidak ditemukan.\n\nKemungkinan penyebab:\n- Rsync error di tengah proses\n- Disk target terlalu kecil\n- Partisi tidak ter-mount dengan benar\n\nError rsync:\n$RSYNC_ERR\n\nInstalasi dibatalkan." \
+    --msgbox "Filesystem tidak tersalin dengan benar (rsync exit: $RC).\n\nKemungkinan penyebab:\n- Rsync error di tengah proses\n- Disk target terlalu kecil\n- Partisi tidak ter-mount dengan benar\n\nError rsync:\n$RSYNC_ERR\n\nInstalasi dibatalkan." \
     "$EH" "$DW"
-  # Unmount sebelum keluar
-  umount /mnt/boot/efi 2>/dev/null
-  umount /mnt 2>/dev/null
   exit 1
 fi
 rm -f "$RSYNC_LOG"
 
 # ── Tahap 5: fstab & identitas ────────────────────────────
 {
-  echo 10; mkdir -p /mnt/{dev,proc,sys,tmp,run}; echo 30
+  echo 10
+  mkdir -p /mnt/dev /mnt/proc /mnt/sys /mnt/run /mnt/mnt /mnt/media /mnt/tmp
+  chmod 1777 /mnt/tmp
+  echo 30
   ROOT_UUID=$(blkid -s UUID -o value "$TARGET_ROOT_PART")
-  echo "UUID=$ROOT_UUID / ext4 errors=remount-ro 0 1" > /mnt/etc/fstab; echo 60
+  echo "UUID=$ROOT_UUID / ext4 errors=remount-ro 0 1" > /mnt/etc/fstab
+  echo 60
   if [ "$IS_UEFI" -eq 1 ]; then
     EFI_UUID=$(blkid -s UUID -o value "$EFI_PART")
-    echo "UUID=$EFI_UUID /boot/efi vfat defaults 0 2" >> /mnt/etc/fstab
+    echo "UUID=$EFI_UUID /boot/efi vfat umask=0077 0 2" >> /mnt/etc/fstab
   fi
-  echo 80; truncate -s 0 /mnt/etc/machine-id
-  rm -f /mnt/var/lib/dbus/machine-id; echo 100
+  echo 80
+  truncate -s 0 /mnt/etc/machine-id
+  rm -f /mnt/var/lib/dbus/machine-id
+  echo 100
 } | whiptail --title "$TITLE" --gauge \
     "$(center_line "[5/6] Menulis fstab & mereset identitas sistem...")" \
     "$GH" "$GW" 0
@@ -450,29 +478,41 @@ rm -f "$RSYNC_LOG"
 # ── Tahap 6: Chroot ───────────────────────────────────────
 infobox "$(center_line "[6/6] Chroot: user, initramfs & GRUB (beberapa menit)...")"
 
-mount --bind /dev     /mnt/dev
-mount --bind /dev/pts /mnt/dev/pts
-mount --bind /proc    /mnt/proc
-mount --bind /sys     /mnt/sys
-mount --bind /run     /mnt/run
+mount --rbind /dev  /mnt/dev  && mount --make-rslave /mnt/dev
+mount --rbind /proc /mnt/proc && mount --make-rslave /mnt/proc
+mount --rbind /sys  /mnt/sys  && mount --make-rslave /mnt/sys
+mount --rbind /run  /mnt/run  && mount --make-rslave /mnt/run
 
 CHROOT_LOG=$(mktemp)
 
-chroot /mnt /bin/bash <<EOF 2>&1 | tee "$CHROOT_LOG"
+# Script yang dijalankan di dalam chroot (heredoc ber-quote: tidak ada
+# ekspansi variabel oleh shell luar; nilai dikirim lewat environment)
+cat > /mnt/tmp/postinstall.sh <<'EOS'
+#!/bin/bash
+set -e
 export DEBIAN_FRONTEND=noninteractive
 
 echo "[chroot] Mengatur timezone..."
-ln -sf /usr/share/zoneinfo/$TIMEZONE /etc/localtime
-dpkg-reconfigure -f noninteractive tzdata
+ln -sf "/usr/share/zoneinfo/$TIMEZONE" /etc/localtime
+echo "$TIMEZONE" > /etc/timezone
+dpkg-reconfigure -f noninteractive tzdata || true
 
 echo "[chroot] Membuat user $NEW_USER..."
-id -u "$NEW_USER" &>/dev/null || \
-  useradd -m -s /bin/bash -G sudo,adm,cdrom,plugdev,netdev "$NEW_USER"
-echo "$NEW_USER:$NEW_PASS" | chpasswd
+GROUPS_LIST=""
+for g in sudo adm cdrom plugdev netdev; do
+  getent group "$g" >/dev/null && GROUPS_LIST="${GROUPS_LIST:+$GROUPS_LIST,}$g"
+done
+if ! id -u "$NEW_USER" &>/dev/null; then
+  if [ -n "$GROUPS_LIST" ]; then
+    useradd -m -s /bin/bash -G "$GROUPS_LIST" "$NEW_USER"
+  else
+    useradd -m -s /bin/bash "$NEW_USER"
+  fi
+fi
 
 mkdir -p /etc/sudoers.d
-echo "$NEW_USER ALL=(ALL:ALL) NOPASSWD:ALL" > /etc/sudoers.d/$NEW_USER
-chmod 0440 /etc/sudoers.d/$NEW_USER
+echo "$NEW_USER ALL=(ALL:ALL) NOPASSWD:ALL" > "/etc/sudoers.d/$NEW_USER"
+chmod 0440 "/etc/sudoers.d/$NEW_USER"
 
 if [ "$AUTO_LOGIN" = "y" ]; then
   echo "[chroot] Mengatur autologin..."
@@ -488,32 +528,90 @@ echo "[chroot] Memperbarui initramfs..."
 update-initramfs -u -k all
 
 echo "[chroot] Memasang GRUB..."
-if [ -d "/sys/firmware/efi" ]; then
-  apt-get update -y
-  apt-get install -y grub-efi-amd64
-  grub-install --target=x86_64-efi \
-    --efi-directory=/boot/efi \
+apt-get update -y
+if [ "$IS_UEFI" = "1" ]; then
+  apt-get install -y grub-efi-amd64 efibootmgr
+  grub-install --target=x86_64-efi --efi-directory=/boot/efi \
     --bootloader-id=GRUB --recheck
+  # Fallback path (berguna di VM / firmware tanpa NVRAM yang bisa ditulis)
+  grub-install --target=x86_64-efi --efi-directory=/boot/efi \
+    --removable --recheck || true
 else
-  apt-get update -y
   apt-get install -y grub-pc
-  grub-install "$TARGET"
+  grub-install --recheck "$TARGET"
 fi
 
 echo "[chroot] Memperbarui konfigurasi GRUB..."
 update-grub
-EOF
 
-CHROOT_EXIT=${PIPESTATUS[0]}
+# aaPanel TIDAK bisa dipasang di dalam chroot (butuh systemd/jaringan yang
+# berjalan), jadi dipasang sekali saat boot pertama lewat service oneshot.
+if [ "$WP_CHOICE" = "1" ]; then
+  echo "[chroot] Menyiapkan instalasi aaPanel saat boot pertama..."
+  apt-get install -y curl wget ca-certificates
+
+  cat > /usr/local/sbin/install-aapanel.sh <<'EOT'
+#!/bin/bash
+exec >> /var/log/aapanel-install.log 2>&1
+URL="https://www.aapanel.com/script/install_panel_en.sh"
+cd /root || exit 1
+curl -fsSL -o install_panel_en.sh "$URL" || wget -q -O install_panel_en.sh "$URL" || exit 1
+yes y | bash install_panel_en.sh ipssl
+rc=${PIPESTATUS[1]}
+rm -f install_panel_en.sh
+if [ "$rc" -eq 0 ]; then
+  systemctl disable aapanel-firstboot.service
+  rm -f /etc/systemd/system/aapanel-firstboot.service /usr/local/sbin/install-aapanel.sh
+fi
+exit "$rc"
+EOT
+  chmod 755 /usr/local/sbin/install-aapanel.sh
+
+  cat > /etc/systemd/system/aapanel-firstboot.service <<'EOT'
+[Unit]
+Description=aaPanel first-boot installation
+After=network-online.target
+Wants=network-online.target
+ConditionPathExists=/usr/local/sbin/install-aapanel.sh
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/install-aapanel.sh
+TimeoutStartSec=0
+
+[Install]
+WantedBy=multi-user.target
+EOT
+  systemctl enable aapanel-firstboot.service || \
+    ln -sf /etc/systemd/system/aapanel-firstboot.service \
+           /etc/systemd/system/multi-user.target.wants/aapanel-firstboot.service
+fi
+
+echo "[chroot] Selesai."
+EOS
+chmod 755 /mnt/tmp/postinstall.sh
+
+# Set password lewat stdin (aman untuk karakter spesial seperti $ " ` \)
+printf '%s:%s\n' "$NEW_USER" "$NEW_PASS" > /mnt/tmp/.pw
+chmod 600 /mnt/tmp/.pw
+
+chroot /mnt /usr/bin/env \
+  TIMEZONE="$TIMEZONE" NEW_USER="$NEW_USER" AUTO_LOGIN="$AUTO_LOGIN" \
+  IS_UEFI="$IS_UEFI" TARGET="$TARGET" WP_CHOICE="$WP_CHOICE" \
+  /bin/bash /tmp/postinstall.sh >"$CHROOT_LOG" 2>&1
+CHROOT_EXIT=$?
+
+if [ "$CHROOT_EXIT" -eq 0 ]; then
+  chroot /mnt /usr/sbin/chpasswd < /mnt/tmp/.pw >>"$CHROOT_LOG" 2>&1
+  CHROOT_EXIT=$?
+fi
+rm -f /mnt/tmp/.pw /mnt/tmp/postinstall.sh
 
 # ── Cleanup ───────────────────────────────────────────────
 {
-  echo 10; sync; echo 30
-  [ "$IS_UEFI" -eq 1 ] && umount /mnt/boot/efi 2>/dev/null
-  echo 50
-  umount /mnt/dev/pts /mnt/dev 2>/dev/null; echo 70
-  umount /mnt/proc /mnt/sys /mnt/run 2>/dev/null; echo 90
-  umount /mnt 2>/dev/null; echo 100
+  echo 20; sync
+  echo 50; umount -R /mnt 2>/dev/null || umount -R -l /mnt 2>/dev/null
+  echo 100
 } | whiptail --title "$TITLE" --gauge \
     "$(center_line "Membersihkan & unmounting partisi...")" \
     "$GH" "$GW" 0
@@ -522,8 +620,7 @@ CHROOT_EXIT=${PIPESTATUS[0]}
 # [10] HASIL AKHIR
 # ============================================================
 if [ "$CHROOT_EXIT" -ne 0 ]; then
-  LOG_SNIPPET=$(tail -20 "$CHROOT_LOG" 2>/dev/null \
-    | sed 's/[^[:print:]\t]//g')
+  LOG_SNIPPET=$(tail -20 "$CHROOT_LOG" 2>/dev/null | sed 's/[^[:print:]\t]//g')
   FH=$(( MAX_DH > 22 ? 22 : MAX_DH ))
   whiptail --title "Instalasi Gagal" --scrolltext \
     --msgbox "Proses chroot error (kode: $CHROOT_EXIT).\n\nLog:\n\n$LOG_SNIPPET\n\nLog lengkap: $CHROOT_LOG" \
@@ -537,10 +634,11 @@ DONE_BODY="\
 $(center_line "Instalasi berhasil diselesaikan!")\n\
 $(center_line "================================")\n\
 \n\
-$(printf "  %-10s : %s" "Disk"     "$TARGET")\n\
-$(printf "  %-10s : %s" "User"     "$NEW_USER")\n\
-$(printf "  %-10s : %s" "Boot"     "$BOOT_MODE")\n\
-$(printf "  %-10s : %s" "Timezone" "$TIMEZONE")\n\
+$(printf "  %-10s : %s" "Disk"      "$TARGET")\n\
+$(printf "  %-10s : %s" "User"      "$NEW_USER")\n\
+$(printf "  %-10s : %s" "Boot"      "$BOOT_MODE")\n\
+$(printf "  %-10s : %s" "Timezone"  "$TIMEZONE")\n\
+$(printf "  %-10s : %s" "Web Panel" "$WP_NAME")\n\
 \n\
 $(center_line "Jangan lupa cabut media instalasi")\n\
 $(center_line "sebelum menyalakan ulang sistem.")"
@@ -553,7 +651,7 @@ whiptail --title "Instalasi Selesai" \
 # ── Opsi tindakan setelah instalasi ──────────────────────
 ACTION=$(whiptail --title "Selesai — Apa yang ingin kamu lakukan?" \
   --menu "\n$(center_line "Pilih tindakan selanjutnya:")\n" \
-  $(dialog_h 5 8) "$DW" 3 \
+  "$(dialog_h 6 8)" "$DW" 3 \
   "reboot"   "Restart sistem sekarang" \
   "poweroff" "Matikan sistem sekarang" \
   "exit"     "Keluar ke terminal (tanpa restart)" \
@@ -563,14 +661,14 @@ case "$ACTION" in
   reboot)
     whiptail --title "$TITLE" \
       --infobox "\n$(center_line "Sistem akan direstart, sampai jumpa!")\n" \
-      $(dialog_h 1 6) "$DW"
+      "$(dialog_h 2 6)" "$DW"
     sleep 2
     reboot
     ;;
   poweroff)
     whiptail --title "$TITLE" \
       --infobox "\n$(center_line "Sistem akan dimatikan, sampai jumpa!")\n" \
-      $(dialog_h 1 6) "$DW"
+      "$(dialog_h 2 6)" "$DW"
     sleep 2
     poweroff
     ;;
