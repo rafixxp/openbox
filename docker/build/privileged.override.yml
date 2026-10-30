@@ -1,0 +1,24 @@
+# Privileged override for the ISO build worker.
+#
+# live-build creates chroots, mounts /proc and writes filesystem images, so the
+# worker needs broad kernel capabilities. Keep this boundary separate from the
+# panel, agent and database containers.
+#
+# Usage (from the repository root):
+#   docker compose -f docker/compose.dev.yml \
+#                  -f docker/build/privileged.override.yml \
+#                  --profile build up -d --build
+#
+# Never deploy this override on a host that also serves the panel publicly.
+
+services:
+  build-worker:
+    privileged: true
+    security_opt:
+      - seccomp:unconfined
+    cap_add:
+      - SYS_ADMIN
+      - MKNOD
+    tmpfs:
+      - /run
+      - /tmp:exec,mode=1777

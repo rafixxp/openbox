@@ -1,0 +1,64 @@
+name: Build Agent
+
+on:
+  push:
+    paths:
+      - "api/**"
+      - "shared/**"
+      - "docker/agent/**"
+      - "docker/build/**"
+      - ".github/workflows/agent.yml"
+  pull_request:
+    paths:
+      - "api/**"
+      - "shared/**"
+
+concurrency:
+  group: agent-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Typecheck + Vitest + Build
+    runs-on: ubuntu-latest
+
+    defaults:
+      run:
+        working-directory: api
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Install dependencies
+        run: |
+          if [ -f package-lock.json ]; then
+            npm ci --no-audit --no-fund
+          else
+            npm install --no-audit --no-fund
+          fi
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Unit tests
+        run: npm test
+
+      - name: Compile
+        run: npm run build
+
+      - name: Upload dist
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-agent-dist
+          path: api/dist
+          if-no-files-found: error
+          retention-days: 7

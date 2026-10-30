@@ -1,0 +1,33 @@
+{
+    "name": "openbox-panel",
+    "private": true,
+    "type": "module",
+    "scripts": {
+        "dev": "vite",
+        "build": "vue-tsc --noEmit && vite build",
+        "typecheck": "vue-tsc --noEmit",
+        "test": "vitest run",
+        "test:watch": "vitest"
+    },
+    "dependencies": {
+        "@inertiajs/vue3": "^2.0.0",
+        "laravel-echo": "^1.17.1",
+        "pusher-js": "^8.4.0",
+        "qrcode": "^1.5.4",
+        "vue": "^3.5.13"
+    },
+    "devDependencies": {
+        "@types/qrcode": "^1.5.5",
+        "@vitejs/plugin-vue": "^5.2.1",
+        "@vue/test-utils": "^2.4.6",
+        "autoprefixer": "^10.4.20",
+        "jsdom": "^25.0.1",
+        "laravel-vite-plugin": "^1.2.0",
+        "postcss": "^8.4.49",
+        "tailwindcss": "^3.4.17",
+        "typescript": "^5.7.2",
+        "vite": "^6.0.3",
+        "vitest": "^2.1.8",
+        "vue-tsc": "^2.1.10"
+    }
+}

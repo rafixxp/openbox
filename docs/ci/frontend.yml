@@ -1,0 +1,74 @@
+name: Frontend
+
+on:
+  push:
+    paths:
+      - "panel/resources/js/**"
+      - "panel/resources/css/**"
+      - "panel/package.json"
+      - "panel/package-lock.json"
+      - "panel/vite.config.ts"
+      - "panel/vitest.config.ts"
+      - "panel/tsconfig.json"
+      - "panel/tailwind.config.js"
+      - "panel/postcss.config.js"
+      - "panel/resources/views/**"
+      - ".github/workflows/frontend.yml"
+  pull_request:
+    paths:
+      - "panel/resources/js/**"
+      - "panel/resources/css/**"
+      - "panel/package.json"
+      - "panel/vite.config.ts"
+      - "panel/vitest.config.ts"
+      - "panel/tsconfig.json"
+
+concurrency:
+  group: frontend-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Typecheck + Vitest + Vite build
+    runs-on: ubuntu-latest
+
+    defaults:
+      run:
+        working-directory: panel
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Install dependencies
+        run: |
+          if [ -f package-lock.json ]; then
+            npm ci --no-audit --no-fund
+          else
+            npm install --no-audit --no-fund
+          fi
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Unit tests
+        run: npm test
+
+      - name: Production build
+        run: npm run build
+
+      - name: Upload build output
+        uses: actions/upload-artifact@v4
+        with:
+          name: panel-public-build
+          path: panel/public/build
+          if-no-files-found: error
+          retention-days: 7

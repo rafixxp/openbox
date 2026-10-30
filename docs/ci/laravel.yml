@@ -1,0 +1,123 @@
+name: Laravel
+
+on:
+  push:
+    paths:
+      - "panel/**"
+      - "docker/**"
+      - "shared/**"
+      - "docs/ci/laravel.yml"
+      - ".github/workflows/laravel.yml"
+  pull_request:
+    paths:
+      - "panel/**"
+      - "docker/**"
+      - "shared/**"
+
+concurrency:
+  group: laravel-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Pest + Pint
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_DB: openbox_panel_test
+          POSTGRES_USER: openbox
+          POSTGRES_PASSWORD: openbox-test-password
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U openbox -d openbox_panel_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 20
+
+    env:
+      APP_ENV: testing
+      APP_KEY: "base64:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
+      DB_CONNECTION: pgsql
+      DB_HOST: 127.0.0.1
+      DB_PORT: "5432"
+      DB_DATABASE: openbox_panel_test
+      DB_USERNAME: openbox
+      DB_PASSWORD: openbox-test-password
+      REDIS_HOST: 127.0.0.1
+      REDIS_PORT: "6379"
+      CACHE_STORE: array
+      SESSION_DRIVER: array
+      QUEUE_CONNECTION: sync
+      BROADCAST_CONNECTION: null
+      FILESYSTEM_DISK: local
+      MAIL_MAILER: array
+      BUILD_DRIVER: agent
+      BUILD_AGENT_SECRET: test-agent-secret
+      BUILD_AGENT_URL: http://build-agent.test
+
+    defaults:
+      run:
+        working-directory: panel
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up PHP
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: "8.3"
+          extensions: bcmath, intl, pcntl, pdo_pgsql, pgsql, redis, zip
+          coverage: none
+          tools: composer:v2
+
+      - name: Get Composer cache directory
+        id: composer-cache
+        run: echo "dir=$(composer config cache-files-dir)" >> "$GITHUB_OUTPUT"
+
+      - name: Cache Composer downloads
+        uses: actions/cache@v4
+        with:
+          path: ${{ steps.composer-cache.outputs.dir }}
+          key: composer-${{ runner.os }}-${{ hashFiles('panel/composer.lock', 'panel/composer.json') }}
+          restore-keys: |
+            composer-${{ runner.os }}-
+
+      - name: Install dependencies
+        run: |
+          if [ -f composer.lock ]; then
+            composer install --no-interaction --prefer-dist --no-progress
+          else
+            composer update --no-interaction --prefer-dist --no-progress
+          fi
+
+      - name: Prepare environment
+        run: |
+          cp .env.example .env
+          php artisan key:generate --force
+
+      - name: Verify audit triggers on PostgreSQL
+        run: php artisan migrate --force
+
+      - name: Run Pest
+        run: php artisan test --colors=always
+
+      - name: Check code style
+        run: ./vendor/bin/pint --test

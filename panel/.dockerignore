@@ -1,0 +1,15 @@
+vendor
+node_modules
+.env
+.env.*
+!.env.example
+storage/logs/*
+storage/framework/cache/*
+storage/framework/sessions/*
+storage/framework/views/*
+bootstrap/cache/*
+public/build
+public/hot
+.phpunit.result.cache
+.git
+.gitignore
