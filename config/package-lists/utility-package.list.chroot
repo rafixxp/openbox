@@ -17,3 +17,7 @@ sudo
 zstd
 whiptail
 dosfstools
+build-essential
+python3
+make
+dbus
