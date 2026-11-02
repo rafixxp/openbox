@@ -1,0 +1,64 @@
+<!doctype html>
+<html lang="id">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Masuk · NodePanel</title>
+  <link rel="stylesheet" href="/style.css" />
+</head>
+<body class="login-body">
+  <div class="login-card">
+    <div class="login-logo">
+      <span class="logo-mark" style="width:32px;height:32px;border-radius:8px"></span>
+      <span class="logo-text" style="font-size:18px">NodePanel</span>
+    </div>
+    <h1 class="login-title">Masuk ke Panel</h1>
+    <p class="login-sub">Kelola server Linux Anda dari satu tempat.</p>
+    <form id="login-form" class="login-form">
+      <div class="field">
+        <label for="username">Username</label>
+        <input class="input" id="username" name="username" autocomplete="username" required />
+      </div>
+      <div class="field">
+        <label for="password">Password</label>
+        <input class="input" id="password" name="password" type="password" autocomplete="current-password" required />
+      </div>
+      <div id="login-error" class="login-error hidden"></div>
+      <button type="submit" class="btn btn-primary login-submit" id="login-btn">Masuk</button>
+    </form>
+    <p class="login-hint">Gunakan <span class="mono">username</span> &amp; <span class="mono">password</span> akun Linux lokal (sama seperti SSH / su).</p>
+  </div>
+
+  <script>
+    const form = document.getElementById('login-form');
+    const errBox = document.getElementById('login-error');
+    form.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      errBox.classList.add('hidden');
+      const btn = document.getElementById('login-btn');
+      btn.disabled = true; btn.textContent = 'Memproses...';
+      try {
+        const res = await fetch('/api/auth/login', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            username: document.getElementById('username').value,
+            password: document.getElementById('password').value,
+          }),
+        });
+        if (res.ok) {
+          location.href = '/';
+          return;
+        }
+        const j = await res.json().catch(() => ({}));
+        errBox.textContent = j.error || 'Login gagal';
+        errBox.classList.remove('hidden');
+      } catch {
+        errBox.textContent = 'Tidak dapat terhubung ke server';
+        errBox.classList.remove('hidden');
+      }
+      btn.disabled = false; btn.textContent = 'Masuk';
+    });
+  </script>
+</body>
+</html>

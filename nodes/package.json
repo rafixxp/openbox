@@ -1,0 +1,24 @@
+{
+  "name": "nodepanel",
+  "version": "1.0.0",
+  "description": "Simple Linux server web panel built with Express.js",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "serve": "node server.js",
+    "dev": "node server.js"
+  },
+  "keywords": [
+    "server-panel",
+    "express",
+    "linux"
+  ],
+  "license": "MIT",
+  "dependencies": {
+    "express": "^4.21.2",
+    "multer": "^2.5.0",
+    "node-pty": "^1.0.0",
+    "systeminformation": "^5.25.11",
+    "ws": "^8.18.0"
+  }
+}
