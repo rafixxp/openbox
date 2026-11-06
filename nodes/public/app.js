@@ -1651,6 +1651,7 @@ async function renderTerminal(el) {
     try { termSocket && termSocket.close(); } catch {}
     try { term && term.dispose(); } catch {}
     const container = $('#term-container');
+    container.innerHTML = '';
     term = new window.Terminal({
       cursorBlink: true,
       fontSize: 13,
