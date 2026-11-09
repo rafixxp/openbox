@@ -1,0 +1,12 @@
+nodes/node_modules
+auto 
+binary
+*binary*
+cache 
+chroot 
+chroot.files 
+chroot.packages.install 
+chroot.packages.live 
+local 
+*openbox* 
+*wget*
