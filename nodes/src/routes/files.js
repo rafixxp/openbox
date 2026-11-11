@@ -5,9 +5,35 @@ const path = require('path');
 const os = require('os');
 const { execFile } = require('child_process');
 const multer = require('multer');
+const auth = require('../auth');
 
 const router = express.Router();
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 200 * 1024 * 1024 } });
+
+function isRoot() {
+  return typeof process.getuid === 'function' ? process.getuid() === 0 : true;
+}
+
+/** root akses file: admin bebas; user biasa terkurung di home dir masing-masing */
+function resolveRoot(req, requested) {
+  if (req.isAdmin) {
+    if (requested && fs.existsSync(requested) && fs.statSync(requested).isDirectory()) return requested;
+    return process.env.PANEL_ROOT || os.homedir();
+  }
+  return homeOf(req.user) || os.homedir();
+}
+
+function homeOf(username) {
+  try {
+    const line = fs.readFileSync('/etc/passwd', 'utf8').split('\n')
+      .find((l) => l.split(':')[0] === username);
+    if (!line) return null;
+    const home = line.split(':').slice(5, 6)[0];
+    return home && fs.existsSync(home) ? home : null;
+  } catch {
+    return null;
+  }
+}
 
 const exec = (cmd, args, options = {}) =>
   new Promise((resolve) => {
@@ -28,8 +54,7 @@ function safePath(base, target) {
   return resolved;
 }
 
-function getRoot(p) {
-  if (p && fs.existsSync(p) && fs.statSync(p).isDirectory()) return p;
+function getRoot() {
   return process.env.PANEL_ROOT || os.homedir();
 }
 
@@ -55,7 +80,7 @@ async function uniquePath(p) {
 
 router.get('/browse', async (req, res) => {
   try {
-    const root = getRoot(req.query.root);
+    const root = resolveRoot(req, req.query.root);
     const rel = req.query.path ? String(req.query.path) : '';
     const abs = safePath(root, rel || '.');
     if (!abs) return res.status(400).json({ error: 'Path tidak valid' });
@@ -105,7 +130,7 @@ router.get('/browse', async (req, res) => {
 
 router.get('/read', async (req, res) => {
   try {
-    const root = getRoot(req.query.root);
+    const root = resolveRoot(req, req.query.root);
     const abs = safePath(root, req.query.path);
     if (!abs) return res.status(400).json({ error: 'Path tidak valid' });
     const st = await fsp.stat(abs);
@@ -126,7 +151,7 @@ router.get('/read', async (req, res) => {
 
 router.post('/save', async (req, res) => {
   try {
-    const root = getRoot(req.body.root);
+    const root = resolveRoot(req, req.body.root);
     const abs = safePath(root, req.body.path);
     if (!abs) return res.status(400).json({ error: 'Path tidak valid' });
     await fsp.writeFile(abs, String(req.body.content ?? ''), 'utf8');
@@ -138,7 +163,7 @@ router.post('/save', async (req, res) => {
 
 router.post('/create', async (req, res) => {
   try {
-    const root = getRoot(req.body.root);
+    const root = resolveRoot(req, req.body.root);
     const abs = safePath(root, req.body.path);
     if (!abs) return res.status(400).json({ error: 'Path tidak valid' });
     try {
@@ -160,7 +185,7 @@ router.post('/create', async (req, res) => {
 
 router.post('/rename', async (req, res) => {
   try {
-    const root = getRoot(req.body.root);
+    const root = resolveRoot(req, req.body.root);
     const from = safePath(root, req.body.from);
     const to = safePath(root, req.body.to);
     if (!from || !to) return res.status(400).json({ error: 'Path tidak valid' });
@@ -173,7 +198,7 @@ router.post('/rename', async (req, res) => {
 
 router.post('/delete', async (req, res) => {
   try {
-    const root = getRoot(req.body.root);
+    const root = resolveRoot(req, req.body.root);
     const abs = safePath(root, req.body.path);
     if (!abs || abs === path.resolve(root)) return res.status(400).json({ error: 'Path tidak valid' });
     const st = await fsp.lstat(abs);
@@ -187,7 +212,7 @@ router.post('/delete', async (req, res) => {
 
 router.post('/upload', upload.single('file'), async (req, res) => {
   try {
-    const root = getRoot(req.body.root);
+    const root = resolveRoot(req, req.body.root);
     const abs = safePath(root, req.body.path);
     if (!abs) return res.status(400).json({ error: 'Path tidak valid' });
     await fsp.writeFile(abs, req.file.buffer);
@@ -198,7 +223,7 @@ router.post('/upload', upload.single('file'), async (req, res) => {
 });
 
 router.get('/download', (req, res) => {
-  const root = getRoot(req.query.root);
+  const root = resolveRoot(req, req.query.root);
   const abs = safePath(root, req.query.path);
   if (!abs) return res.status(400).json({ error: 'Path tidak valid' });
   res.download(abs, path.basename(abs), (err) => {
@@ -208,7 +233,7 @@ router.get('/download', (req, res) => {
 
 router.post('/copy', async (req, res) => {
   try {
-    const root = getRoot(req.body.root);
+    const root = resolveRoot(req, req.body.root);
     const from = safePath(root, req.body.from);
     if (!from || !fs.existsSync(from)) return res.status(400).json({ error: 'Sumber tidak ada' });
     let to = safePath(root, req.body.to);
@@ -223,7 +248,7 @@ router.post('/copy', async (req, res) => {
 
 router.post('/move', async (req, res) => {
   try {
-    const root = getRoot(req.body.root);
+    const root = resolveRoot(req, req.body.root);
     const from = safePath(root, req.body.from);
     if (!from || !fs.existsSync(from)) return res.status(400).json({ error: 'Sumber tidak ada' });
     let to = safePath(root, req.body.to);
@@ -238,7 +263,7 @@ router.post('/move', async (req, res) => {
 
 router.post('/compress', async (req, res) => {
   try {
-    const root = getRoot(req.body.root);
+    const root = resolveRoot(req, req.body.root);
     const abs = safePath(root, req.body.path);
     if (!abs || !fs.existsSync(abs)) return res.status(400).json({ error: 'Path tidak ada' });
     const parent = path.dirname(abs);
@@ -276,7 +301,7 @@ router.post('/compress', async (req, res) => {
 
 router.post('/extract', async (req, res) => {
   try {
-    const root = getRoot(req.body.root);
+    const root = resolveRoot(req, req.body.root);
     const abs = safePath(root, req.body.path);
     if (!abs || !fs.existsSync(abs)) return res.status(400).json({ error: 'Path tidak ada' });
     const parent = path.dirname(abs);
@@ -316,7 +341,7 @@ router.post('/extract', async (req, res) => {
 
 router.post('/chmod', async (req, res) => {
   try {
-    const root = getRoot(req.body.root);
+    const root = resolveRoot(req, req.body.root);
     const abs = safePath(root, req.body.path);
     const mode = String(req.body.mode || '').trim();
     if (!abs || !fs.existsSync(abs)) return res.status(400).json({ error: 'Path tidak ada' });
@@ -336,7 +361,7 @@ router.post('/chmod', async (req, res) => {
 
 router.get('/du', async (req, res) => {
   try {
-    const root = getRoot(req.query.root);
+    const root = resolveRoot(req, req.query.root);
     const abs = safePath(root, req.query.path);
     if (!abs || !fs.existsSync(abs)) return res.status(400).json({ error: 'Path tidak ada' });
     const result = await exec('du', ['-s', '-b', abs], { timeout: 60000 });
@@ -353,7 +378,7 @@ const IMAGE_MIME = { '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/
 
 router.get('/preview', async (req, res) => {
   try {
-    const root = getRoot(req.query.root);
+    const root = resolveRoot(req, req.query.root);
     const abs = safePath(root, req.query.path);
     if (!abs || !fs.existsSync(abs)) return res.status(400).json({ error: 'Path tidak ada' });
     const ext = path.extname(abs).toLowerCase();

@@ -1,6 +1,7 @@
 <!doctype html>
 <html lang="id">
 <head>
+  <script>try { document.documentElement.dataset.theme = localStorage.getItem("np-theme") === "dark" ? "dark" : "light"; } catch (_) {}</script>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>Masuk · NodePanel</title>
@@ -26,7 +27,7 @@
       <div id="login-error" class="login-error hidden"></div>
       <button type="submit" class="btn btn-primary login-submit" id="login-btn">Masuk</button>
     </form>
-    <p class="login-hint">Gunakan <span class="mono">username</span> &amp; <span class="mono">password</span> akun Linux lokal (sama seperti SSH / su).</p>
+    <p class="login-hint">Gunakan <span class="mono">username</span> &amp; <span class="mono">password</span> akun Linux lokal (sama seperti SSH / su). Akun dengan shell aktif (mis. <span class="mono">/bin/bash</span>) dapat masuk.</p>
   </div>
 
   <script>

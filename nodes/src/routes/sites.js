@@ -3,14 +3,17 @@ const fs = require('fs');
 const fsp = fs.promises;
 const path = require('path');
 const { execFile } = require('child_process');
-const util = require('util');
+const auth = require('../auth');
 
-const execFileAsync = util.promisify(execFile);
 const router = express.Router();
 
 const NGINX_SITES_AVAILABLE = ['/etc/nginx/sites-available', '/etc/nginx/conf.d'];
 const NGINX_SITES_ENABLED = '/etc/nginx/sites-enabled';
 const WEB_ROOT = '/var/www';
+
+function isRoot() {
+  return typeof process.getuid === 'function' ? process.getuid() === 0 : true;
+}
 
 function run(cmd, args, options = {}) {
   return new Promise((resolve) => {
@@ -20,12 +23,29 @@ function run(cmd, args, options = {}) {
   });
 }
 
+/** command yang butuh hak root → sudo -n bila proses panel bukan root */
+function runPriv(cmd, args, options = {}) {
+  if (isRoot()) return run(cmd, args, options);
+  return run('sudo', ['-n', cmd, ...args], options);
+}
+
 function findSitesDir() {
   for (const dir of NGINX_SITES_AVAILABLE) {
     if (fs.existsSync(dir) && fs.statSync(dir).isDirectory()) return dir;
   }
   return null;
 }
+
+function isNginxConfAllowed(file) {
+  if (typeof file !== 'string') return false;
+  return NGINX_SITES_AVAILABLE.some((dir) => file === path.join(dir, path.basename(file)));
+}
+
+function isWebDirSafe(dir) {
+  return typeof dir === 'string' && path.resolve(dir).startsWith(WEB_ROOT + '/');
+}
+
+/* ---------- baca (semua user login) ---------- */
 
 router.get('/', async (req, res) => {
   const sitesDir = findSitesDir();
@@ -85,10 +105,6 @@ router.get('/', async (req, res) => {
   });
 });
 
-function isNginxConfAllowed(file) {
-  return NGINX_SITES_AVAILABLE.some((dir) => file === path.join(dir, path.basename(file)));
-}
-
 router.get('/git-info', async (req, res) => {
   const dir = req.query.dir;
   if (!isWebDirSafe(dir) || !fs.existsSync(path.join(dir, '.git'))) {
@@ -109,45 +125,6 @@ router.get('/git-info', async (req, res) => {
   });
 });
 
-router.post('/git-pull', async (req, res) => {
-  const { dir } = req.body;
-  if (!isWebDirSafe(dir) || !fs.existsSync(dir + '/.git')) return res.status(400).json({ error: 'Direktori bukan repo git' });
-  const pull = await run('git', ['-C', dir, 'pull'], { timeout: 300000 });
-  res.json({
-    ok: pull.code === 0,
-    output: ((pull.stdout || '') + (pull.stderr || '')).trim()
-  });
-});
-
-function isWebDirSafe(dir) {
-  return typeof dir === 'string' && path.resolve(dir).startsWith(WEB_ROOT + '/');
-}
-
-function isNginxConfAllowed(file) {
-  return NGINX_SITES_AVAILABLE.some((dir) => file === path.join(dir, path.basename(file)));
-}
-
-router.post('/toggle', async (req, res) => {
-  const { file, enable } = req.body;
-  if (!file || !isNginxConfAllowed(file)) return res.status(400).json({ error: 'File harus di direktori sites nginx' });
-  if (!fs.existsSync(NGINX_SITES_ENABLED)) return res.status(400).json({ error: 'site-enabled tidak ditemukan' });
-  const link = path.join(NGINX_SITES_ENABLED, path.basename(file));
-  if (enable) {
-    if (!fs.existsSync(link)) {
-      const ln = await run('ln', ['-s', file, link]);
-      if (ln.code !== 0) return res.status(400).json({ error: 'Gagal symlink: ' + (ln.stderr || '').trim() });
-    }
-  } else if (fs.existsSync(link)) {
-    await fsp.unlink(link).catch(() => {});
-  }
-  const test = await run('nginx', ['-t']);
-  if (test.code !== 0) {
-    return res.status(400).json({ error: 'Konfigurasi nginx tidak valid: ' + (test.stderr || '').trim() });
-  }
-  const reload = await run('systemctl', ['reload', 'nginx']);
-  res.json({ ok: reload.code === 0, enabled: enable, nginxReloadOutput: (reload.stderr || reload.stdout).trim() });
-});
-
 router.get('/config', async (req, res) => {
   try {
     const file = req.query.file;
@@ -158,31 +135,68 @@ router.get('/config', async (req, res) => {
   }
 });
 
-router.post('/config', async (req, res) => {
-  try {
-    if (!req.body.file || !isNginxConfAllowed(req.body.file)) {
-      return res.status(400).json({ error: 'Hanya file di sites-available yang boleh diubah' });
-    }
-    await fsp.writeFile(req.body.file, req.body.content, 'utf8');
-    const reload = await run('systemctl', ['reload', 'nginx']);
-    res.json({ ok: reload.code === 0, nginxReloadOutput: (reload.stderr || reload.stdout).trim() });
-  } catch (err) {
-    res.status(400).json({ error: err.message });
-  }
-});
-
 router.post('/nginx-test', async (req, res) => {
-  const test = await run('nginx', ['-t']);
+  const test = await runPriv('nginx', ['-t'], { timeout: 30000 });
   res.json({
     ok: test.code === 0,
     output: ((test.stdout || '') + (test.stderr || '')).trim() || 'OK'
   });
 });
 
-router.post('/git-clone', async (req, res) => {
+/* ---------- tulis (admin saja) ---------- */
+
+router.post('/toggle', auth.requireAdmin, async (req, res) => {
+  const { file, enable } = req.body;
+  if (!file || !isNginxConfAllowed(file)) return res.status(400).json({ error: 'File harus di direktori sites nginx' });
+  if (!fs.existsSync(NGINX_SITES_ENABLED)) return res.status(400).json({ error: 'site-enabled tidak ditemukan' });
+  const link = path.join(NGINX_SITES_ENABLED, path.basename(file));
+  if (enable) {
+    if (!fs.existsSync(link)) {
+      const ln = await runPriv('ln', ['-s', file, link]);
+      if (ln.code !== 0) return res.status(400).json({ error: 'Gagal symlink: ' + (ln.stderr || '').trim() });
+    }
+  } else if (fs.existsSync(link)) {
+    await fsp.unlink(link).catch(() => {});
+  }
+  const test = await runPriv('nginx', ['-t']);
+  if (test.code !== 0) {
+    return res.status(400).json({ error: 'Konfigurasi nginx tidak valid: ' + (test.stderr || '').trim() });
+  }
+  const reload = await runPriv('systemctl', ['reload', 'nginx']);
+  res.json({ ok: reload.code === 0, enabled: enable, nginxReloadOutput: (reload.stderr || reload.stdout).trim() });
+});
+
+router.post('/config', auth.requireAdmin, async (req, res) => {
+  try {
+    const file = req.body.file;
+    if (!file || !isNginxConfAllowed(file)) {
+      return res.status(400).json({ error: 'Hanya file di sites-available yang boleh diubah' });
+    }
+    await fsp.writeFile(file, String(req.body.content ?? ''), 'utf8');
+    const reload = await runPriv('systemctl', ['reload', 'nginx']);
+    res.json({ ok: reload.code === 0, nginxReloadOutput: (reload.stderr || reload.stdout).trim() });
+  } catch (err) {
+    const hint = err.code === 'EACCES' || err.code === 'EPERM'
+      ? ' (tidak ada izin menulis — jalankan panel sebagai root atau sesuaikan kepemilikan file)'
+      : '';
+    res.status(400).json({ error: err.message + hint });
+  }
+});
+
+router.post('/git-pull', auth.requireAdmin, async (req, res) => {
+  const { dir } = req.body;
+  if (!isWebDirSafe(dir) || !fs.existsSync(dir + '/.git')) return res.status(400).json({ error: 'Direktori bukan repo git' });
+  const pull = await run('git', ['-C', dir, 'pull'], { timeout: 300000 });
+  res.json({
+    ok: pull.code === 0,
+    output: ((pull.stdout || '') + (pull.stderr || '')).trim()
+  });
+});
+
+router.post('/git-clone', auth.requireAdmin, async (req, res) => {
   const { dir, gitUrl, branch } = req.body;
   if (!isWebDirSafe(dir)) return res.status(400).json({ error: 'Direktori harus di dalam /var/www' });
-  if (!gitUrl || !/^https?:\/\/|\.git$|git@/.test(gitUrl)) return res.status(400).json({ error: 'Git URL tidak valid' });
+  if (!gitUrl || !/^(https?:\/\/|git@|ssh:\/\/)/.test(gitUrl)) return res.status(400).json({ error: 'Git URL tidak valid' });
 
   let entries = [];
   try { entries = await fsp.readdir(dir); } catch { entries = []; }
@@ -192,7 +206,7 @@ router.post('/git-clone', async (req, res) => {
     const res1 = await run('git', args, { timeout: 300000, cwd: WEB_ROOT });
     if (res1.code === 0) return res.json({ ok: true, output: (res1.stdout + res1.stderr).trim() });
     const fallback = await run('git', ['clone', gitUrl, dir], { timeout: 300000, cwd: WEB_ROOT });
-    if (fallback.code !== 0) return res.status(400).json({ error: 'Clone gagal: ' + ((fallback.stderr + res1.stderr).trim().slice(0, 500)) });
+    if (fallback.code !== 0) return res.status(400).json({ error: 'Clone gagal: ' + ((fallback.stderr || '') + (res1.stderr || '')).trim().slice(0, 500) });
     return res.json({ ok: true, output: (fallback.stdout + fallback.stderr).trim() });
   }
 
@@ -203,27 +217,30 @@ router.post('/git-clone', async (req, res) => {
   const init = await run('git', ['-C', dir, 'init']);
   const remoteAdd = await run('git', ['-C', dir, 'remote', 'add', 'origin', gitUrl], { timeout: 15000 });
   if (init.code !== 0 || remoteAdd.code !== 0) {
-    return res.status(400).json({ error: 'Git init gagal: ' + ((init.stderr + remoteAdd.stderr).trim().slice(0, 400)) });
+    return res.status(400).json({ error: 'Git init gagal: ' + ((init.stderr || '') + (remoteAdd.stderr || '')).trim().slice(0, 400) });
   }
   const fetch = await run('git', ['-C', dir, 'fetch', 'origin'], { timeout: 300000 });
   if (fetch.code !== 0) {
-    return res.status(400).json({ error: 'Fetch gagal: ' + fetch.stderr.trim().slice(0, 500) });
+    return res.status(400).json({ error: 'Fetch gagal: ' + (fetch.stderr || '').trim().slice(0, 500) });
   }
   const br = branch || 'main';
   const checkout = await run('git', ['-C', dir, 'checkout', '-B', br, `origin/${br}`], { timeout: 60000 });
   if (checkout.code !== 0) {
     const co2 = await run('git', ['-C', dir, 'checkout', '-B', br, 'origin/HEAD'], { timeout: 60000 });
     if (co2.code !== 0) {
-      return res.status(400).json({ error: `Branch ${br} tidak ada / checkout gagal: ` + (co2.stderr + checkout.stderr).trim().slice(0, 400) });
+      return res.status(400).json({ error: `Branch ${br} tidak ada / checkout gagal: ` + ((co2.stderr || '') + (checkout.stderr || '')).trim().slice(0, 400) });
     }
   }
   res.json({ ok: true, output: ('Repo terhubung dari folder existing: ' + (fetch.stdout + fetch.stderr).trim().slice(0, 300)) });
 });
 
-router.post('/create', async (req, res) => {
+router.post('/create', auth.requireAdmin, async (req, res) => {
   const { name, serverName, gitUrl, branch, port, root } = req.body;
   if (!name || !/^[a-zA-Z0-9._-]+$/.test(name)) {
     return res.status(400).json({ error: 'Nama website tidak valid (a-z, 0-9, ., _, -)' });
+  }
+  if (port && !/^\d{1,5}$/.test(String(port))) {
+    return res.status(400).json({ error: 'Port tidak valid' });
   }
 
   const sitesDir = findSitesDir();
@@ -232,15 +249,20 @@ router.post('/create', async (req, res) => {
   const confFile = path.join(sitesDir, name);
   if (fs.existsSync(confFile)) return res.status(409).json({ error: 'File konfigurasi sudah ada' });
 
+  if (root && !path.isAbsolute(root)) {
+    return res.status(400).json({ error: 'Docroot harus path absolut' });
+  }
   const docroot = root || path.join(WEB_ROOT, name);
   let gitInfo = { configured: true, added: null };
 
   if (gitUrl) {
+    if (!/^(https?:\/\/|git@|ssh:\/\/)/.test(gitUrl)) return res.status(400).json({ error: 'Git URL tidak valid' });
+    if (/[\s'"$;&`(){}<>\\|]/.test(gitUrl)) return res.status(400).json({ error: 'Git URL mengandung karakter tidak aman' });
     const clone = await run('git', ['clone', '-b', branch || 'main', gitUrl, docroot], { timeout: 300000 });
     if (clone.code !== 0) {
       const fallback = await run('git', ['clone', gitUrl, docroot], { timeout: 300000 });
       if (fallback.code !== 0) {
-        return res.status(400).json({ error: 'Git clone gagal: ' + ((fallback.stderr || '') + clone.stderr).trim().slice(0, 400) });
+        return res.status(400).json({ error: 'Git clone gagal: ' + ((fallback.stderr || '') + (clone.stderr || '')).trim().slice(0, 400) });
       }
     }
   } else {
@@ -271,18 +293,18 @@ router.post('/create', async (req, res) => {
   if (fs.existsSync(NGINX_SITES_ENABLED)) {
     const link = path.join(NGINX_SITES_ENABLED, name);
     if (!fs.existsSync(link)) {
-      const ln = await run('ln', ['-s', confFile, link]);
+      const ln = await runPriv('ln', ['-s', confFile, link]);
       if (ln.code === 0) gitInfo.added = link;
     }
   }
 
-  const test = await run('nginx', ['-t']);
+  const test = await runPriv('nginx', ['-t']);
   if (test.code !== 0) {
     await fsp.unlink(confFile).catch(() => {});
     return res.status(400).json({ error: 'Konfigurasi nginx tidak valid: ' + (test.stderr || '').trim() });
   }
 
-  const reload = await run('systemctl', ['reload', 'nginx']);
+  const reload = await runPriv('systemctl', ['reload', 'nginx']);
   res.json({
     ok: true,
     name,
@@ -294,7 +316,7 @@ router.post('/create', async (req, res) => {
   });
 });
 
-router.post('/delete', async (req, res) => {
+router.post('/delete', auth.requireAdmin, async (req, res) => {
   const { file, dir, deleteDir } = req.body;
   const results = {};
   if (file) {
@@ -306,11 +328,12 @@ router.post('/delete', async (req, res) => {
       await fsp.unlink(enabledLink).catch(() => {});
       results.enabledLinkRemoved = true;
     }
-    const reload = await run('systemctl', ['reload', 'nginx']);
+    const reload = await runPriv('systemctl', ['reload', 'nginx']);
     results.nginxReloaded = reload.code === 0;
   }
   if (dir && deleteDir) {
     if (!isWebDirSafe(dir)) return res.status(400).json({ error: 'Tidak boleh menghapus di luar /var/www' });
+    if (path.resolve(dir) === WEB_ROOT) return res.status(400).json({ error: 'Tidak boleh menghapus /var/www itu sendiri' });
     await fsp.rm(dir, { recursive: true, force: true });
     results.docrootRemoved = true;
   }

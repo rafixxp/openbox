@@ -2,6 +2,7 @@ const express = require('express');
 const fs = require('fs');
 const path = require('path');
 const { execFile } = require('child_process');
+const auth = require('../auth');
 
 const exec = (cmd, args, options = {}) =>
   new Promise((resolve) => {
@@ -9,6 +10,15 @@ const exec = (cmd, args, options = {}) =>
       resolve({ code: err ? (err.code || 1) : 0, stdout, stderr, err });
     });
   });
+
+function isRoot() {
+  return typeof process.getuid === 'function' ? process.getuid() === 0 : true;
+}
+
+function execPriv(cmd, args, options = {}) {
+  if (isRoot()) return exec(cmd, args, options);
+  return exec('sudo', ['-n', cmd, ...args], options);
+}
 
 const router = express.Router();
 const LIVE_DIR = '/etc/letsencrypt/live';
@@ -40,28 +50,32 @@ router.get('/info', async (req, res) => {
   res.json({ found: false, domain });
 });
 
-router.post('/renew', async (req, res) => {
+router.post('/renew', auth.requireAdmin, async (req, res) => {
   const certName = String(req.body.certName || '').trim();
-  if (!certName || certName.includes('/') || certName.includes('..')) {
+  if (!certName || !/^[a-zA-Z0-9._-]+$/.test(certName)) {
     return res.status(400).json({ error: 'certName tidak valid' });
   }
-  const result = await exec('certbot', ['renew', '--cert-name', certName, '--non-interactive'], { timeout: 300000 });
+  const result = await execPriv('certbot', ['renew', '--cert-name', certName, '--non-interactive'], { timeout: 300000 });
   res.json({
     ok: result.code === 0,
     output: ((result.stdout || '') + '\n' + (result.stderr || '')).trim()
   });
 });
 
-router.post('/issue', async (req, res) => {
+router.post('/issue', auth.requireAdmin, async (req, res) => {
   const domain = String(req.body.domain || '').trim();
   const email = String(req.body.email || '').trim();
-  if (!domain || domain.includes('/') || /\s/.test(domain)) {
+  // domain dipakai sebagai argumen CLI & nama folder certbot → wajib karakter aman
+  if (!domain || !/^[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$/.test(domain)) {
     return res.status(400).json({ error: 'Domain tidak valid' });
+  }
+  if (email && !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) {
+    return res.status(400).json({ error: 'Email tidak valid' });
   }
   const args = ['--nginx', '-d', domain, '--non-interactive', '--agree-tos'];
   if (email) args.push('-m', email);
   else args.push('--register-unsafely-without-email');
-  const result = await exec('certbot', args, { timeout: 300000 });
+  const result = await execPriv('certbot', args, { timeout: 300000 });
   res.json({
     ok: result.code === 0,
     output: ((result.stdout || '') + '\n' + (result.stderr || '')).trim()

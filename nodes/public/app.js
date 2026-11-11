@@ -43,6 +43,24 @@ function esc(s) {
   return String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 }
 
+function getInitials(value) {
+  const words = String(value || '').trim().split(/\\s+/).filter(Boolean);
+  if (!words.length) return '?';
+  return (words.length === 1 ? words[0].slice(0, 2) : words.slice(0, 2).map((w) => w[0]).join('')).toUpperCase();
+}
+
+function applyTheme(theme) {
+  const selected = theme === 'dark' ? 'dark' : 'light';
+  document.documentElement.dataset.theme = selected;
+  localStorage.setItem('np-theme', selected);
+  const label = $('#theme-current');
+  if (label) label.textContent = selected === 'dark' ? 'Dark Mode' : 'Light Mode';
+  $$('[data-theme-choice]').forEach((button) => {
+    button.classList.toggle('active', button.dataset.themeChoice === selected);
+    button.setAttribute('aria-pressed', String(button.dataset.themeChoice === selected));
+  });
+}
+
 function modal({ title, body, footer, wide }) {
   const root = $('#modal-root');
   root.innerHTML = `
@@ -803,67 +821,37 @@ async function renderFiles(el) {
 }
 
 
-/* ============ DATABASE ============ */
-async function renderDatabase(el) {
-  el.innerHTML = `<div class="card"><div class="empty"><span class="spinner"></span>&nbsp; Mendeteksi database...</div></div>`;
-  let data;
-  try { data = await api('/api/database/status'); }
-  catch (e) { el.innerHTML = `<div class="card"><div class="empty">${esc(e.message)}</div></div>`; return; }
-
-  const runningServers = data.servers.filter((s) => s.running);
-  el.innerHTML = `
-    <div class="grid grid-kpi">
-      <div class="card"><div class="card-body"><div class="kpi-label">Database Server</div><div class="kpi-value">${data.servers.length}</div><div class="kpi-sub">terdeteksi (mysql/mariadb)</div></div></div>
-      <div class="card"><div class="card-body"><div class="kpi-label">Berjalan</div><div class="kpi-value">${data.runningCount}</div><div class="kpi-sub">aktif saat ini</div></div></div>
-      <div class="card"><div class="card-body"><div class="kpi-label">Databases</div><div class="kpi-value">${runningServers.reduce((n, s) => n + s.databases.length, 0)}</div><div class="kpi-sub">dikonfirmasi</div></div></div>
-      <div class="card"><div class="card-body"><div class="kpi-label">Tipe</div><div class="kpi-value">SQL + Cache</div><div class="kpi-sub">mysql/mariadb + redis</div></div></div>
-    </div>
-    <div class="card">
-      <div class="card-header"><span class="card-title">Status &amp; Database</span></div>
-      <div class="card-body" style="padding:0">
-        <table>
-          <thead><tr><th>Service</th><th>Status</th><th>Database / Cache</th><th style="width:150px">Aksi</th></tr></thead>
-          <tbody>
-            ${data.servers.map((s) => `<tr>
-              <td class="mono" style="font-weight:600">${esc(s.service)}</td>
-              <td><span class="badge ${s.running ? 'badge-success' : 'badge-danger'}">${s.running ? 'running' : 'stopped'}</span></td>
-              <td>${s.databases.map((d) => `<div class="mono" style="font-size:12px">${esc(d.name)}${d.kind ? ` <span class="muted">(${esc(d.kind)})</span>` : ''}</div>`).join('') || '—'}</td>
-              <td class="actions-cell">
-                <button class="btn btn-sm btn-primary" data-svc="${esc(s.service)}" data-do="start" ${s.running ? 'disabled' : ''}>Start</button>
-                <button class="btn btn-sm" data-svc="${esc(s.service)}" data-do="stop" ${!s.running ? 'disabled' : ''}>Stop</button>
-                <button class="btn btn-sm" data-svc="${esc(s.service)}" data-do="restart">Restart</button>
-              </td>
-            </tr>`).join('')}
-          </tbody>
-        </table>
-      </div>
-    </div>`;
-
-  $$('[data-svc]', el).forEach((b) => b.addEventListener('click', async () => {
-    const svc = b.dataset.svc;
-    const action = b.dataset.do;
-    if (!['start', 'stop', 'restart'].includes(action)) return;
-    b.disabled = true;
-    try {
-      const r = await api('/api/services/action', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name: svc, action }) });
-      toast(`${svc} — ${action} ok`);
-      renderDatabase(el);
-    } catch (e) { toast(e.message, 'error'); }
-    b.disabled = false;
-  }));
-}
-
+/* ============ ACCOUNT ============ */
 async function renderAccount(el) {
+  const meData = ME || {};
+  const isAdmin = !!meData.isAdmin;
+
   el.innerHTML = `
     <div class="grid grid-2">
-      <div class="card">
-        <div class="card-header"><span class="card-title">Akun Saya</span></div>
-        <div class="card-body"><dl class="kv" id="me-kv"><dt>Memuat...</dt><dd></dd></dl></div>
+      <div class="card profile-card">
+        <div class="card-header"><span class="card-title">Profil Saya</span>${isAdmin ? '<span class="badge badge-danger">admin</span>' : '<span class="badge">user</span>'}</div>
+        <div class="card-body">
+          <div class="profile-identity">
+            <span class="profile-avatar" id="profile-avatar">${esc(getInitials(meData?.fullName || meData?.username))}</span>
+            <div><div class="profile-name" id="profile-name">${esc(meData?.fullName || meData?.username || '-')}</div><div class="muted mono" id="profile-username">@${esc(meData?.username || '-')}</div></div>
+          </div>
+          <dl class="kv" id="me-kv"><dt>Memuat...</dt><dd></dd></dl>
+        </div>
+      </div>
+      <div class="card theme-card">
+        <div class="card-header"><span class="card-title">Tampilan</span><span class="muted" id="theme-current">Light Mode</span></div>
+        <div class="card-body">
+          <p class="muted" style="font-size:12px;margin-bottom:14px">Pilih tema antarmuka NodePanel. Preferensi disimpan di browser ini.</p>
+          <div class="theme-options">
+            <button class="theme-option" type="button" data-theme-choice="light"><span class="theme-preview light-preview"></span><span><strong>Light Mode</strong><small>Tampilan terang</small></span></button>
+            <button class="theme-option" type="button" data-theme-choice="dark"><span class="theme-preview dark-preview"></span><span><strong>Dark Mode</strong><small>Tampilan gelap</small></span></button>
+          </div>
+        </div>
       </div>
       <div class="card">
         <div class="card-header"><span class="card-title">Ganti Password Linux</span></div>
         <div class="card-body">
-          <p class="muted" style="font-size:12px;margin-bottom:10px">Mengubah password akun Linux <span class="mono">${esc(ME ? ME.username : '-')}</span> (sama seperti password login SSH/su panel ini).</p>
+          <p class="muted" style="font-size:12px;margin-bottom:10px">Mengubah password akun Linux <span class="mono">${esc(meData ? meData.username : '-')}</span> (sama seperti password login SSH/su panel ini).</p>
           <div class="field"><label>Password saat ini</label><input class="input" id="pw-current" type="password" autocomplete="current-password"></div>
           <div class="field"><label>Password baru</label><input class="input" id="pw-new" type="password" autocomplete="new-password"></div>
           <div class="field"><label>Konfirmasi password baru</label><input class="input" id="pw-confirm" type="password" autocomplete="new-password"></div>
@@ -871,28 +859,42 @@ async function renderAccount(el) {
         </div>
       </div>
     </div>
+    ${isAdmin ? `
     <div class="card">
       <div class="card-header">
         <span class="card-title">Akun Linux</span>
         <div style="display:flex;gap:8px">
           <button class="btn btn-sm" id="acc-refresh">Refresh</button>
-          <button class="btn btn-sm btn-primary" id="acc-new">+ Akun Baru</button>
+          <button class="btn btn-sm btn-primary" id="acc-new">+ Buat Akun Baru</button>
         </div>
       </div>
       <p class="card-note" style="font-size:12px">Daftar user Linux lokal (uid &ge; 1000). Perubahan dieksekusi via <span class="mono">useradd/usermod/userdel</span>; server panel membutuhkan hak root.</p>
       <div class="card-body" style="padding:0" id="acc-table"><div class="empty"><span class="spinner"></span>&nbsp; Memuat akun...</div></div>
-    </div>`;
+    </div>` : `
+    <div class="card">
+      <div class="card-header"><span class="card-title">Kelola Akun Linux</span></div>
+      <div class="card-body">
+        <p class="muted" style="font-size:12px">Manajemen akun Linux (membuat/mengedit/menghapus user) hanya untuk administrator. Hubungi admin server jika butuh akun baru.</p>
+      </div>
+    </div>`}`;
 
   try {
     const me = await api('/api/auth/me');
     $('#me-kv').innerHTML = `
-      <dt>Username</dt><dd>${esc(me.user.username)}</dd>
+      <dt>Nama lengkap</dt><dd>${esc(me.user.fullName || 'Belum diatur')}</dd>
+      <dt>Username Linux</dt><dd>${esc(me.user.username)}</dd>
       <dt>Home</dt><dd>${esc(me.user.home || '-')}</dd>
       <dt>Shell</dt><dd>${esc(me.user.shell || '-')}</dd>
       <dt>Status Sesi</dt><dd><span class="badge badge-success">aktif</span> (cookie 7 hari)</dd>`;
+    $('#profile-name').textContent = me.user.fullName || me.user.username;
+    $('#profile-username').textContent = '@' + me.user.username;
+    $('#profile-avatar').textContent = getInitials(me.user.fullName || me.user.username);
   } catch {
     $('#me-kv').innerHTML = '<dt>Info</dt><dd>tidak bisa memuat</dd>';
   }
+
+  $$('[data-theme-choice]').forEach((button) => button.addEventListener('click', () => applyTheme(button.dataset.themeChoice)));
+  applyTheme(localStorage.getItem('np-theme') || 'light');
 
   $('#pw-save').addEventListener('click', async () => {
     const current = $('#pw-current').value;
@@ -948,11 +950,18 @@ async function renderAccount(el) {
     if (btn.dataset.a === 'del') {
       openModal({
         title: 'Hapus akun',
-        body: `<p>Hapus akun Linux <span class="mono">${esc(name)}</span>?</p>
-          <label class="checkline"><input type="checkbox" id="del-home"> Hapus juga home direktori (-r)</label>`,
-        footer: `<button class="btn btn-sm btn-primary" id="del-cancel">Batal</button><button class="btn btn-sm btn-danger" id="del-ok">Hapus</button>`,
+        body: `<div class="confirm-danger"><strong>Anda yakin ingin menghapus akun ini?</strong><p>Akun Linux <span class="mono">${esc(name)}</span> akan dihapus dan tidak dapat dipulihkan melalui NodePanel.</p></div>
+          <label class="checkline"><input type="checkbox" id="del-home"> Hapus juga home directory beserta isinya</label>`,
+        footer: `<button class="btn btn-sm" id="del-cancel">Batal</button><button class="btn btn-sm btn-danger" id="del-ok" disabled>Ya, hapus akun</button>`,
       });
       $('#del-cancel').addEventListener('click', closeModal);
+      $('#del-ok').disabled = true;
+      $('#del-home').addEventListener('change', () => { /* opsi penghapusan home tidak menjadi persetujuan */ });
+      const delConfirm = document.createElement('label');
+      delConfirm.className = 'checkline delete-ack';
+      delConfirm.innerHTML = '<input type="checkbox" id="del-ack"> Saya memahami bahwa akun akan dihapus';
+      $('.modal-body').appendChild(delConfirm);
+      $('#del-ack').addEventListener('change', () => { $('#del-ok').disabled = !$('#del-ack').checked; });
       $('#del-ok').addEventListener('click', async () => {
         const rmHome = $('#del-home').checked ? '?removeHome=1' : '';
         await doReq(() => api(`/api/accounts/${encodeURIComponent(name)}${rmHome}`, { method: 'DELETE' }), closeModal, loadAccounts);
@@ -1004,7 +1013,7 @@ async function renderAccount(el) {
         <div class="field"><label>Nama lengkap</label><input class="input" id="n-gecos" placeholder="opsional"></div>
         <div class="field"><label>Shell</label><input class="input" id="n-shell" value="/bin/bash"></div>
         <div class="field"><label>Grup tambahan</label><input class="input" id="n-groups" placeholder="opsional, koma antar grup"></div>
-        <div class="field"><label>Password</label><input class="input" id="n-pass" type="password" autocomplete="new-password"></div>
+        <div class="field"><label>Password (minimal 8 karakter)</label><input class="input" id="n-pass" type="password" autocomplete="new-password" minlength="8" required></div>
         <div class="field"><label class="checkline"><input type="checkbox" id="n-sudo"> Memberi akses sudo</label></div>
         <p class="muted" style="font-size:12px">Home directory dibuat otomatis (<span class="mono">useradd -m</span>).</p>`,
       footer: `<button class="btn btn-sm" id="n-cancel">Batal</button><button class="btn btn-sm btn-primary" id="n-save">Buat</button>`,
@@ -1014,6 +1023,8 @@ async function renderAccount(el) {
       const name = $('#n-name').value.trim();
       const payload = { name, gecos: $('#n-gecos').value, shell: $('#n-shell').value.trim(), groups: $('#n-groups').value, password: $('#n-pass').value, sudo: $('#n-sudo').checked };
       if (!name) return toast('Nama akun wajib', 'error');
+      if (!/^[a-z_][a-z0-9_-]{0,31}$/i.test(name)) return toast('Format username Linux tidak valid', 'error');
+      if (payload.password.length < 8) return toast('Password minimal 8 karakter', 'error');
       await doReq(() => api('/api/accounts', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) }), closeModal, loadAccounts);
     });
   });
@@ -1059,9 +1070,19 @@ async function renderServices(el) {
     </div>`;
 
   const tb = $('#svc-table');
+  const canManage = !!ME?.isAdmin;
+  function manageNote() {
+    if (!canManage) {
+      return `<div class="card-note" style="font-size:12px;color:var(--muted);font-style:italic">Aksi start/stop/restart hanya untuk administrator (akun dengan akses sudo). Anda hanya bisa memantau status.</div>`;
+    }
+    if (!data.manageable) {
+      return `<div class="card-note" style="font-size:12px;color:var(--danger)">Panel tidak berjalan sebagai root dan sudo tanpa password tidak tersedia — aksi akan ditolak sistem. Jalankan panel via sudo/root.</div>`;
+    }
+    return '';
+  }
   function draw(filter = '') {
     const list = data.services.filter((s) => s.shortName.toLowerCase().includes(filter.toLowerCase()) || (s.description || '').toLowerCase().includes(filter.toLowerCase()));
-    tb.innerHTML = list.length === 0 ? `<div class="empty">Tidak ada layanan yang cocok</div>` :
+    tb.innerHTML = manageNote() + (list.length === 0 ? `<div class="empty">Tidak ada layanan yang cocok</div>` :
       `<table>
         <thead><tr><th>Layanan</th><th>Deskripsi</th><th>Tipe</th><th>Status</th><th style="width:280px">Aksi</th></tr></thead>
         <tbody>
@@ -1071,14 +1092,15 @@ async function renderServices(el) {
             <td class="mono muted">${esc(s.type)}</td>
             <td><span class="badge ${s.state === 'running' ? 'badge-success' : s.state === 'exited' ? '' : 'badge-danger'}">${esc(s.state)}</span></td>
             <td class="actions-cell">
+              ${canManage ? `
               <button class="btn btn-sm btn-primary" data-do="start" data-id="${esc(s.name)}" ${s.state === 'running' ? 'disabled' : ''}>${SI.play} Start</button>
               <button class="btn btn-sm" data-do="stop" data-id="${esc(s.name)}" ${s.state !== 'running' ? 'disabled' : ''}>${SI.stop} Stop</button>
-              <button class="btn btn-sm" data-do="restart" data-id="${esc(s.name)}">${SI.restart} Restart</button>
+              <button class="btn btn-sm" data-do="restart" data-id="${esc(s.name)}">${SI.restart} Restart</button>` : ''}
               <button class="btn btn-sm" data-do="status" data-id="${esc(s.name)}">${SI.info} Detail</button>
             </td>
           </tr>`).join('')}
         </tbody>
-      </table>`;
+      </table>`);
 
     $$('button[data-do]', tb).forEach((b) => b.addEventListener('click', async () => {
       const action = b.dataset.do, name = b.dataset.id;
@@ -1098,7 +1120,7 @@ async function renderServices(el) {
   }
 
   function showDetail(name) {
-    return api('/api/services/action', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name: name.replace('.service', ''), action: 'status' }) })
+    return api('/api/services/status', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name: name.replace('.service', '') }) })
       .then((r) => {
         modal({
           title: `Detail: ${esc(name)}`,
@@ -1154,7 +1176,7 @@ async function renderSites(el) {
 
     <div class="card">
       <div class="card-header"><span class="card-title">${SI.globe} Websites</span>
-        <button class="btn btn-sm btn-primary" id="site-add">${SI.plus} Website Baru</button>
+        ${ME?.isAdmin ? `<button class="btn btn-sm btn-primary" id="site-add">${SI.plus} Website Baru</button>` : ''}
       </div>
       <div class="card-body borderless-rows" style="padding:0">
         ${sitesTable(data.sites)}
@@ -1173,8 +1195,8 @@ async function renderSites(el) {
               <td class="mono muted" style="max-width:260px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${esc(w.gitUrl || '')}">${w.hasGit ? esc(w.gitUrl || 'origin tidak ada') : '—'}</td>
               <td class="mono">${esc(w.branch || '—')}</td>
               <td class="actions-cell">
-                ${w.hasGit ? `<button class="btn btn-sm btn-primary" data-pull="${esc(w.path)}">${SI.pull} Git Pull</button>` : ''}
-                <button class="btn btn-sm btn-danger" data-delsite="${esc(w.name)}">${SI.trash} Hapus</button>
+                ${ME?.isAdmin && w.hasGit ? `<button class="btn btn-sm btn-primary" data-pull="${esc(w.path)}">${SI.pull} Git Pull</button>` : ''}
+                ${ME?.isAdmin ? `<button class="btn btn-sm btn-danger" data-delsite="${esc(w.name)}">${SI.trash} Hapus</button>` : ''}
               </td>
             </tr>`).join('')}
           </tbody>
@@ -1218,7 +1240,7 @@ async function renderSites(el) {
             <td><span class="badge ${s.enabled ? 'badge-success' : ''}">${s.enabled ? 'enabled' : 'disabled'}</span></td>
             <td class="actions-cell">
               <a class="btn btn-sm btn-primary" href="#/site/${esc(name)}">${SI.info} Detail</a>
-              <button class="btn btn-sm btn-danger" data-delconf="${esc(s.file)}">${SI.trash} Hapus conf</button>
+              ${ME?.isAdmin ? `<button class="btn btn-sm btn-danger" data-delconf="${esc(s.file)}">${SI.trash} Hapus conf</button>` : ''}
             </td>
           </tr>`;
           }).join('')}
@@ -1323,8 +1345,8 @@ async function renderSiteDetail(el, name, tab) {
         </div>
       </div>
       <div style="display:flex;gap:8px">
-        ${site ? `<button class="btn btn-sm" id="sd-toggle">${site.enabled ? 'Disable' : 'Enable'}</button>` : ''}
-        <button class="btn btn-sm btn-danger" id="sd-delete">Hapus Website</button>
+        ${ME?.isAdmin && site ? `<button class="btn btn-sm" id="sd-toggle">${site.enabled ? 'Disable' : 'Enable'}</button>` : ''}
+        ${ME?.isAdmin ? `<button class="btn btn-sm btn-danger" id="sd-delete">Hapus Website</button>` : ''}
       </div>
     </div>
 
@@ -1399,12 +1421,14 @@ async function renderSiteDetail(el, name, tab) {
           <div class="card-header"><span class="card-title">Git</span></div>
           <div class="empty">
             Folder ini belum dihubungkan dengan repository Git.
+            ${ME?.isAdmin ? `
             <div style="margin-top:14px">
               <button class="btn btn-primary" id="git-connect">Hubungkan Repo</button>
-            </div>
+            </div>` : '<div class="muted" style="font-size:12px;margin-top:8px">Menghubungkan repo hanya oleh administrator.</div>'}
           </div>
         </div>`;
-      $('#git-connect', container).addEventListener('click', () => connectRepo());
+      const gconn = $('#git-connect', container);
+      if (gconn) gconn.addEventListener('click', () => connectRepo());
       return;
     }
 
@@ -1412,7 +1436,7 @@ async function renderSiteDetail(el, name, tab) {
       <div class="card">
         <div class="card-header">
           <span class="card-title">Repository</span>
-          <button class="btn btn-sm btn-primary" id="git-pull">Git Pull</button>
+          ${ME?.isAdmin ? `<button class="btn btn-sm btn-primary" id="git-pull">Git Pull</button>` : ''}
         </div>
         <div class="card-body"><dl class="kv">
           <dt>Remote origin</dt><dd>${esc(g.gitUrl || '-')}</dd>
@@ -1478,8 +1502,8 @@ async function renderSiteDetail(el, name, tab) {
         <div class="card-header">
           <span class="card-title">Konfigurasi Nginx — <span class="mono">${esc(site.file)}</span></span>
           <div style="display:flex;gap:8px">
-            <button class="btn btn-sm" id="cfg-nginx-test">Test Config</button>
-            <button class="btn btn-sm btn-primary" id="cfg-save">Simpan & Reload</button>
+            ${ME?.isAdmin ? `<button class="btn btn-sm" id="cfg-nginx-test">Test Config</button>
+            <button class="btn btn-sm btn-primary" id="cfg-save">Simpan & Reload</button>` : ''}
           </div>
         </div>
         <div class="card-body">
@@ -1536,17 +1560,18 @@ async function renderSiteDetail(el, name, tab) {
               <dt>Lokasi</dt><dd>${esc(info.dir || '-')}</dd>
             </dl>
             <div style="margin-top:14px;display:flex;gap:8px">
-              <button class="btn btn-primary" id="ssl-renew">Perpanjang SSL</button>
+              ${ME?.isAdmin ? `<button class="btn btn-primary" id="ssl-renew">Perpanjang SSL</button>` : ''}
               <span class="muted" style="align-self:center">certbot renew --cert-name ${esc(info.certName || domain)}</span>
             </div>
           ` : `
-            <div class="empty">
-              Belum ada sertifikat SSL untuk <b>${esc(domain)}</b>.
-              <div style="margin-top:14px;max-width:420px;margin-left:auto;margin-right:auto;text-align:left">
-                <div class="field"><label>Email untuk notifikasi Let's Encrypt (opsional)</label><input class="input mono" id="ssl-email" placeholder="admin@example.com"></div>
-                <button class="btn btn-primary" id="ssl-issue" style="width:100px">Issue SSL</button>
+              <div class="empty">
+                Belum ada sertifikat SSL untuk <b>${esc(domain)}</b>.
+                ${ME?.isAdmin ? `
+                <div style="margin-top:14px;max-width:420px;margin-left:auto;margin-right:auto;text-align:left">
+                  <div class="field"><label>Email untuk notifikasi Let's Encrypt (opsional)</label><input class="input mono" id="ssl-email" placeholder="admin@example.com"></div>
+                  <button class="btn btn-primary" id="ssl-issue" style="width:100px">Issue SSL</button>
+                </div>` : '<div class="muted" style="font-size:12px;margin-top:8px">Issue/perpanjang SSL hanya oleh administrator.</div>'}
               </div>
-            </div>
           `}
         </div>
       </div>`;
@@ -1676,8 +1701,11 @@ async function renderTerminal(el) {
       termSocket.send(JSON.stringify({ type: 'resize', data: { cols: term.cols, rows: term.rows } }));
     };
     termSocket.onmessage = (ev) => {
-      const msg = JSON.parse(ev.data);
+      let msg;
+      try { msg = JSON.parse(ev.data); } catch { return; }
       if (msg.type === 'data') term.write(msg.data);
+      else if (msg.type === 'error') term.write('\r\n\x1b[31m' + (msg.message || 'Terjadi kesalahan') + '\x1b[0m\r\n');
+      else if (msg.type === 'exit') term.write(`\r\n\x1b[33m[Shell keluar (kode ${msg.code}) — tekan Reconnect]\x1b[0m\r\n`);
     };
     term.onData((d) => {
       if (termSocket && termSocket.readyState === 1) termSocket.send(JSON.stringify({ type: 'data', data: d }));
@@ -1690,13 +1718,446 @@ async function renderTerminal(el) {
   start();
 }
 
+/* ============ DATABASE (multi-level CRUD) ============ */
+/* #/database            → daftar service database
+   #/db/SERVICE          → daftar database
+   #/db/SERVICE/DB       → daftar tabel
+   #/db/SERVICE/DB/TBL   → CRUD record  */
+
+const DB_ROW_LIMIT = 50;
+const DB_NAME_RE = /^[a-zA-Z0-9_$][a-zA-Z0-9_$-]{0,63}$/;
+
+async function renderDatabase(el, parts = []) {
+  const [svc, db, table] = parts;
+  if (svc && (!DB_NAME_RE.test(svc))) svc = '';
+  if (db && (!DB_NAME_RE.test(db))) { location.hash = '#/database'; return; }
+  if (table && (!DB_NAME_RE.test(table))) { location.hash = `#/database/${encodeURIComponent(svc)}/${encodeURIComponent(db)}`; return; }
+
+  if (!svc) return renderDbServices(el);
+  if (!db) return renderDbList(el, svc);
+  if (!table) return renderDbTables(el, svc, db);
+  return renderDbRecords(el, svc, db, table);
+}
+
+function dbCrumbs(crumbParts) {
+  // crumbParts: array dari { label, hash } — item pertama selalu "Database"
+  return `
+    <div class="db-crumbs" style="margin-bottom:12px;font-size:13px;display:flex;gap:6px;flex-wrap:wrap">
+      <a href="#/database" style="color:inherit;text-decoration:none;font-weight:600">Database</a>
+      ${crumbParts.map((c) => `<span class="sep muted">/</span><a href="${c.hash ? esc(c.hash) : '#/database'}" ${c.hash ? 'class="mono" style="color:inherit;text-decoration:none"' : 'class="mono"'}>${esc(c.label)}</a>`).join('')}
+    </div>`;
+}
+
+async function dbAction(url, method, body) {
+  return api(url, { method, headers: { 'Content-Type': 'application/json' }, body: body === undefined ? '{}' : JSON.stringify(body) });
+}
+
+function dbRefresh(btn, fn) {
+  btn.disabled = true;
+  fn().finally(() => { btn.disabled = false; });
+}
+
+/* --- Level 1: service database --- */
+async function renderDbServices(el) {
+  el.innerHTML = `<div class="card"><div class="empty"><span class="spinner"></span>&nbsp; Mendeteksi service database...</div></div>`;
+  let data;
+  try { data = await api('/api/database'); }
+  catch (e) { el.innerHTML = `<div class="card"><div class="empty">${esc(e.message)}</div></div>`; return; }
+
+  el.innerHTML = `
+    <div class="card">
+      <div class="card-header"><span class="card-title">${SI.layers} Service Database</span>
+        <button class="btn btn-sm" id="dbs-refresh">Refresh</button></div>
+      <div class="card-body borderless-rows" style="padding:0">
+        ${data.servers.length === 0 ? '<div class="empty">Tidak ada service database terdeteksi</div>' :
+        `<table>
+          <thead><tr><th>Service</th><th>Status</th><th>Unit</th><th>Kemampuan</th><th style="width:330px">Aksi</th></tr></thead>
+          <tbody>
+            ${data.servers.map((s) => `<tr>
+              <td class="mono" style="font-weight:600">${esc(s.label)}</td>
+              <td><span class="badge ${s.running ? 'badge-success' : 'badge-danger'}">${s.running ? 'running' : 'stopped'}</span></td>
+              <td class="mono muted">${esc(s.unit || '—')}</td>
+              <td>${s.manageable ? '<span class="badge badge-success">CRUD</span>' : '<span class="badge">status</span>'}</td>
+              <td class="actions-cell">
+                ${s.manageable ? (s.running && s.clientAvailable
+                  ? `<a class="btn btn-sm btn-primary" href="#/db/${esc(s.service)}">Kelola Database</a>`
+                  : (s.running ? '<span class="muted" title="Client CLI tidak ditemukan">client CLI tidak ada</span>' : '')) : ''}
+                <button class="btn btn-sm" data-svc="${esc(s.unit || s.service)}" data-do="start" ${s.running ? 'disabled' : ''}>Start</button>
+                <button class="btn btn-sm" data-svc="${esc(s.unit || s.service)}" data-do="stop" ${!s.running ? 'disabled' : ''}>Stop</button>
+                <button class="btn btn-sm" data-svc="${esc(s.unit || s.service)}" data-do="restart">Restart</button>
+              </td>
+            </tr>`).join('')}
+          </tbody>
+        </table>`}
+      </div>
+      <p class="card-note" style="font-size:12px;margin:0 18px 14px">CRUD database/tabel/record tersedia untuk MySQL &amp; MariaDB. Status service lain (PostgreSQL/Redis) dimonitor di sini — kontrol penuh via menu Services.</p>
+    </div>`;
+
+  $('#dbs-refresh').addEventListener('click', () => dbRefresh($('#dbs-refresh'), () => renderDbServices(el)));
+  $$('button[data-svc]', el).forEach((b) => b.addEventListener('click', async () => {
+    b.disabled = true;
+    try {
+      await dbAction('/api/services/action', 'POST', { name: b.dataset.svc, action: b.dataset.do });
+      toast(`${b.dataset.svc} — ${b.dataset.do} ok`);
+      renderDbServices(el);
+    } catch (e) { toast(e.message, 'error'); b.disabled = false; }
+  }));
+}
+
+/* --- Level 2: daftar database --- */
+async function renderDbList(el, svc) {
+  el.innerHTML = `<div class="card"><div class="empty"><span class="spinner"></span>&nbsp; Memuat databases...</div></div>`;
+  let data;
+  try { data = await api(`/api/database/${encodeURIComponent(svc)}/databases`); }
+  catch (e) { el.innerHTML = `<div class="card"><div class="empty">${esc(e.message)}</div></div>`; return; }
+
+  el.innerHTML = `
+    ${dbCrumbs([{ label: svc }])}
+    <div class="grid grid-kpi">
+      <div class="card"><div class="card-body"><div class="kpi-label">Service</div><div class="kpi-value mono" style="font-size:22px">${esc(svc)}</div><div class="kpi-sub">SQL server</div></div></div>
+      <div class="card"><div class="card-body"><div class="kpi-label">Databases</div><div class="kpi-value">${data.databases.length}</div><div class="kpi-sub">total terdeteksi</div></div></div>
+    </div>
+    <div class="card">
+      <div class="card-header"><span class="card-title">Databases</span>
+        <div style="display:flex;gap:8px">
+          <input class="input" id="dbd-filter" placeholder="Cari database..." style="width:200px">
+          <button class="btn btn-sm btn-primary" id="dbd-new">+ Database Baru</button>
+        </div>
+      </div>
+      <div class="card-body borderless-rows" style="padding:0" id="dbd-body"></div>
+    </div>`;
+
+  function draw(filter = '') {
+    const list = data.databases.filter((d) => d.name.toLowerCase().includes(filter.toLowerCase()));
+    $('#dbd-body').innerHTML = list.length === 0 ? `<div class="empty">Tidak ada yang cocok</div>` :
+      `<table>
+        <thead><tr><th>Nama</th><th>Tipe</th><th style="width:250px">Aksi</th></tr></thead>
+        <tbody>
+          ${list.map((d) => `<tr>
+            <td class="mono" style="font-weight:600">
+              <a href="#/db/${esc(svc)}/${esc(d.name)}" style="color:inherit;text-decoration:none">${esc(d.name)}</a>
+            </td>
+            <td>${d.system ? '<span class="badge">system</span>' : '<span class="badge badge-success">user</span>'}</td>
+            <td class="actions-cell">
+              <a class="btn btn-sm btn-primary" href="#/db/${esc(svc)}/${esc(d.name)}">Tabel</a>
+              ${!d.system ? `<button class="btn btn-sm btn-danger" data-drop="${esc(d.name)}">Drop</button>` : ''}
+            </td>
+          </tr>`).join('')}
+        </tbody>
+      </table>`;
+    $$('button[data-drop]', $('#dbd-body')).forEach((b) => b.addEventListener('click', async () => {
+      const name = b.dataset.drop;
+      if (!confirm(`Hapus database "${name}"? SEMUA isinya hilang permanen.`)) return;
+      try {
+        await dbAction(`/api/database/${encodeURIComponent(svc)}/databases/${encodeURIComponent(name)}`, 'DELETE');
+        toast(`Database "${name}" dihapus`);
+        data.databases = data.databases.filter((x) => x.name !== name);
+        draw($('#dbd-filter')?.value || '');
+      } catch (e) { toast(e.message, 'error'); }
+    }));
+  }
+
+  $('#dbd-filter').addEventListener('input', (e) => draw(e.target.value));
+  $('#dbd-new').addEventListener('click', () => {
+    const md = modal({
+      title: 'Database Baru',
+      body: `<div class="field"><label>Nama database</label><input class="input mono" id="db-nname" placeholder="cth: appku_db"></div>
+        <p class="muted" style="font-size:12px">Charset: utf8mb4 / utf8mb4_unicode_ci.</p>`,
+      footer: `<button class="btn" onclick="closeModal()">Batal</button><button class="btn btn-primary" id="db-nok">Buat</button>`,
+    });
+    $('#db-nname', md).focus();
+    $('#db-nok', md).addEventListener('click', async () => {
+      const name = $('#db-nname', md).value.trim();
+      if (!DB_NAME_RE.test(name)) return toast('Nama tidak valid (huruf/angka/_/-/$)', 'error');
+      try {
+        await dbAction(`/api/database/${encodeURIComponent(svc)}/databases`, 'POST', { name });
+        closeModal();
+        toast(`Database "${name}" dibuat`);
+        data.databases.push({ name, system: false });
+        draw($('#dbd-filter')?.value || '');
+      } catch (e) { toast(e.message, 'error'); }
+    });
+  });
+
+  draw($('#dbd-filter')?.value || '');
+}
+
+/* --- Level 3: daftar tabel --- */
+async function renderDbTables(el, svc, db) {
+  el.innerHTML = `<div class="card"><div class="empty"><span class="spinner"></span>&nbsp; Memuat tabel...</div></div>`;
+  let data;
+  try { data = await api(`/api/database/${encodeURIComponent(svc)}/databases/${encodeURIComponent(db)}/tables`); }
+  catch (e) { el.innerHTML = `<div class="card"><div class="empty">${esc(e.message)}</div></div>`; return; }
+
+  el.innerHTML = `
+    ${dbCrumbs([{ label: svc, hash: `#/db/${esc(svc)}` }, { label: db }])}
+    <div class="card">
+      <div class="card-header"><span class="card-title">Tabel — <span class="mono">${esc(db)}</span></span>
+        <div style="display:flex;gap:8px">
+          <input class="input" id="dbt-filter" placeholder="Cari tabel..." style="width:200px">
+          <button class="btn btn-sm btn-primary" id="dbt-new">+ Tabel Baru</button>
+        </div>
+      </div>
+      <div class="card-body borderless-rows" style="padding:0" id="dbt-body"></div>
+    </div>`;
+
+  function draw(filter = '') {
+    const list = data.tables.filter((t) => t.name.toLowerCase().includes(filter.toLowerCase()));
+    $('#dbt-body').innerHTML = list.length === 0 ? `<div class="empty">Tidak ada tabel${filter ? ' yang cocok' : ''}</div>` :
+      `<table>
+        <thead><tr><th>Tabel</th><th>Engine</th><th>± Baris</th><th style="width:300px">Aksi</th></tr></thead>
+        <tbody>
+          ${list.map((t) => `<tr>
+            <td class="mono"><a href="#/db/${esc(svc)}/${esc(db)}/${esc(t.name)}" style="color:inherit;text-decoration:none;font-weight:600">${esc(t.name)}</a></td>
+            <td class="mono muted">${esc(t.engine || '-')}${t.type === 'VIEW' ? ' <span class="badge">view</span>' : ''}</td>
+            <td class="mono muted">${t.approxRows === null || t.approxRows === undefined ? '—' : t.approxRows}</td>
+            <td class="actions-cell">
+              <a class="btn btn-sm btn-primary" href="#/db/${esc(svc)}/${esc(db)}/${esc(t.name)}">Records</a>
+              ${t.type !== 'VIEW' ? `
+              <button class="btn btn-sm" data-trunc="${esc(t.name)}">Truncate</button>
+              <button class="btn btn-sm btn-danger" data-dropt="${esc(t.name)}">Drop</button>` : ''}
+            </td>
+          </tr>`).join('')}
+        </tbody>
+      </table>`;
+    $$('button[data-trunc]', $('#dbt-body')).forEach((b) => b.addEventListener('click', async () => {
+      const name = b.dataset.trunc;
+      if (!confirm(`TRUNCATE tabel "${name}"? Semua baris hilang permanen.`)) return;
+      try {
+        await dbAction(`/api/database/${encodeURIComponent(svc)}/databases/${encodeURIComponent(db)}/tables/${encodeURIComponent(name)}/truncate`, 'POST');
+        toast(`Tabel "${name}" dikosongkan`);
+        renderDbTables(el, svc, db);
+      } catch (e) { toast(e.message, 'error'); }
+    }));
+    $$('button[data-dropt]', $('#dbt-body')).forEach((b) => b.addEventListener('click', async () => {
+      const name = b.dataset.dropt;
+      if (!confirm(`DROP tabel "${name}"? Permanen.`)) return;
+      try {
+        await dbAction(`/api/database/${encodeURIComponent(svc)}/databases/${encodeURIComponent(db)}/tables/${encodeURIComponent(name)}`, 'DELETE');
+        toast(`Tabel "${name}" dihapus`);
+        data.tables = data.tables.filter((t) => t.name !== name);
+        draw($('#dbt-filter')?.value || '');
+      } catch (e) { toast(e.message, 'error'); }
+    }));
+  }
+
+  $('#dbt-filter').addEventListener('input', (e) => draw(e.target.value));
+  $('#dbt-new').addEventListener('click', () => {
+    const md = modal({
+      title: `Tabel Baru — ${esc(db)}`,
+      wide: true,
+      body: `
+        <div class="field"><label>DDL (CREATE TABLE)</label>
+          <textarea class="input mono" id="dbt-ddl" spellcheck="false" style="min-height:220px"></textarea></div>
+        <p class="muted" style="font-size:12px">Satu statement <span class="mono">CREATE TABLE</span>, tanpa titik-koma di akhir.</p>`,
+      footer: `<button class="btn" onclick="closeModal()">Batal</button><button class="btn btn-primary" id="dbt-ok">Buat</button>`,
+    });
+    const ta = $('#dbt-ddl', md);
+    ta.value = 'CREATE TABLE tabel_baru (\n  id INT AUTO_INCREMENT PRIMARY KEY,\n  nama VARCHAR(255) NOT NULL,\n  dibuat DATETIME DEFAULT CURRENT_TIMESTAMP\n)';
+    ta.focus();
+    $('#dbt-ok', md).addEventListener('click', async () => {
+      try {
+        await dbAction(`/api/database/${encodeURIComponent(svc)}/databases/${encodeURIComponent(db)}/tables`, 'POST', { ddl: ta.value });
+        closeModal();
+        toast('Tabel dibuat');
+        renderDbTables(el, svc, db);
+      } catch (e) { toast(e.message, 'error'); }
+    });
+  });
+
+  draw($('#dbt-filter')?.value || '');
+}
+
+/* --- Level 4: CRUD record --- */
+async function renderDbRecords(el, svc, db, table) {
+  const url = `/api/database/${encodeURIComponent(svc)}/databases/${encodeURIComponent(db)}/tables/${encodeURIComponent(table)}`;
+  el.innerHTML = `<div class="card"><div class="empty"><span class="spinner"></span>&nbsp; Memuat record...</div></div>`;
+
+  const d0 = await api(`${url}?limit=${DB_ROW_LIMIT}&offset=0`).catch((e) => ({ _err: e.message }));
+  if (d0._err) { el.innerHTML = `<div class="card"><div class="empty">${esc(d0._err)}</div></div>`; return; }
+
+  let data = d0;
+  const offset = { value: 0 };
+  const canEdit = () => data.pk.length > 0;
+
+  el.innerHTML = `
+    ${dbCrumbs([{ label: svc, hash: `#/db/${esc(svc)}` }, { label: db, hash: `#/db/${esc(svc)}/${esc(db)}` }, { label: table }])}
+    <div class="card">
+      <div class="card-header"><span class="card-title">Records — <span class="mono">${esc(table)}</span></span>
+        <div style="display:flex;gap:8px;align-items:center">
+          <span class="muted" id="dbr-total"></span>
+          <button class="btn btn-sm" id="dbr-reload">Reload</button>
+          <button class="btn btn-sm btn-primary" id="dbr-new">+ Baris Baru</button>
+        </div>
+      </div>
+      <div class="card-body" id="dbr-note" style="padding:10px 18px 0"></div>
+      <div class="card-body" id="dbr-pager" style="padding:10px 18px"></div>
+      <div class="table-scroll borderless-rows" id="dbr-body"></div>
+    </div>`;
+
+  $('#dbr-note').innerHTML = canEdit()
+    ? `<span class="muted" style="font-size:12px">PK: <span class="mono">${esc(data.pk.join(', '))}</span></span>`
+    : `<div class="card-note" style="color:var(--danger);font-size:12px">Tabel tanpa primary key — hanya bisa dibaca (edit/hapus dinonaktifkan agar tidak salah target).</div>`;
+  if (!canEdit()) $('#dbr-new').style.display = 'none';
+
+  function wheresOf(row) {
+    const where = {};
+    data.pk.forEach((c) => { where[c] = row[c] === 'NULL' ? null : row[c]; });
+    return where;
+  }
+
+  function cellText(v) {
+    if (v === null || v === undefined) return '<span class="muted">NULL</span>';
+    const s = String(v);
+    if (s === '') return '<span class="muted">(kosong)</span>';
+    const short = s.length > 120 ? s.slice(0, 117) + '…' : s;
+    return `<span title="${esc(s.length > 60 ? s : '')}">${esc(short)}</span>`;
+  }
+
+  function drawPager() {
+    const from = offset.value + 1;
+    const to = offset.value + data.rows.length;
+    $('#dbr-pager').innerHTML = `
+      <div style="display:flex;gap:8px;align-items:center">
+        <button class="btn btn-sm" id="pg-prev" ${offset.value === 0 ? 'disabled' : ''}>‹ Prev</button>
+        <span class="muted mono">baris ${data.rows.length ? `${from}-${to}` : '0'} / ${data.total}</span>
+        <button class="btn btn-sm" id="pg-next" ${to >= data.total ? 'disabled' : ''}>Next ›</button>
+      </div>`;
+    $('#pg-prev').addEventListener('click', () => { offset.value = Math.max(0, offset.value - DB_ROW_LIMIT); loadRows(); });
+    $('#pg-next').addEventListener('click', () => { offset.value = offset.value + DB_ROW_LIMIT; loadRows(); });
+    $('#dbr-total').textContent = `${data.total} baris`;
+  }
+
+  function drawRows() {
+    drawPager();
+    const cols = data.columns;
+    const editable = canEdit();
+    $('#dbr-body').innerHTML = data.rows.length === 0 ? `<div class="empty">Tidak ada baris</div>` :
+      `<table>
+        <thead><tr>
+          ${cols.map((c) => `<th title="${esc(c.type)}${c.nullable ? ' · nullable' : ''}${c.extra ? ' · ' + esc(c.extra) : ''}">${esc(c.name)}${c.key === 'PRI' ? ' 🔑' : ''}</th>`).join('')}
+          ${editable ? '<th style="width:160px">Aksi</th>' : ''}
+        </tr></thead>
+        <tbody>
+          ${data.rows.map((row, idx) => `<tr data-idx="${idx}">
+            ${cols.map((c) => `<td class="td-record mono" style="font-size:12px">${cellText(row[c.name])}</td>`).join('')}
+            ${editable ? `<td class="actions-cell">
+              <button class="btn btn-sm" data-edit="${idx}">Edit</button>
+              <button class="btn btn-sm btn-danger" data-del="${idx}">Hapus</button>
+            </td>` : ''}
+          </tr>`).join('')}
+        </tbody>
+      </table>`;
+
+    $$('button[data-edit]', $('#dbr-body')).forEach((b) => b.addEventListener('click', () => editRowModal(data.rows[+b.dataset.edit])));
+    $$('button[data-del]', $('#dbr-body')).forEach((b) => b.addEventListener('click', async () => {
+      const row = data.rows[+b.dataset.del];
+      if (!confirm('Hapus baris ini? Permanen.')) return;
+      try {
+        await dbAction(`${url}/rows`, 'DELETE', { where: wheresOf(row) });
+        toast('Baris dihapus');
+        loadRows();
+      } catch (e) { toast(e.message, 'error'); }
+    }));
+  }
+
+  function fieldFor(col, value) {
+    const isAuto = (col.extra || '').includes('auto_increment');
+    const isBlob = /binary|blob/i.test(col.type);
+    const v = value === null || value === undefined ? '' : String(value);
+    let input;
+    if (isBlob) {
+      input = `<input class="input mono" id="fv-${esc(col.name)}" value="${esc(v.slice(0, 60))}" placeholder="(hex/base64 tidak didukung, kosongkan)" ${isAuto ? 'disabled' : ''}>`;
+    } else if (/(text|enum|json)/i.test(col.type)) {
+      input = `<textarea class="input mono" id="fv-${esc(col.name)}" spellcheck="false" style="min-height:70px">${esc(v)}</textarea>`;
+    } else {
+      input = `<input class="input mono" id="fv-${esc(col.name)}" value="${esc(v)}" ${isAuto ? 'disabled' : ''}>`;
+    }
+    return `
+      <div class="field">
+        <label>${esc(col.name)} <span class="muted" style="font-size:12px">(${esc(col.type)}${isAuto ? ' · auto' : col.nullable ? ' · boleh NULL' : ' · wajib'})</span></label>
+        <div style="display:flex;gap:10px;align-items:center">
+          ${input}
+          ${col.nullable && !isAuto ? `<label class="checkline" style="white-space:nowrap"><input type="checkbox" id="fn-${esc(col.name)}"> <span class="muted" style="font-size:12px">NULL</span></label>` : ''}
+        </div>
+      </div>`;
+  }
+
+  function collectValues(columns, skipEmptyDefault) {
+    const values = {};
+    for (const col of columns) {
+      if ((col.extra || '').includes('auto_increment')) continue;
+      const nullBox = document.getElementById(`fn-${col.name}`);
+      const input = document.getElementById(`fv-${col.name}`);
+      if (!input) continue;
+      if (nullBox && nullBox.checked) { values[col.name] = null; continue; }
+      if (skipEmptyDefault && input.value === '' && col.dflt !== null && col.dflt !== undefined) continue; // pakai default DB
+      values[col.name] = input.value;
+    }
+    return values;
+  }
+
+  function editRowModal(row) {
+    const md = modal({
+      title: `Edit Baris — ${esc(table)}`,
+      wide: true,
+      body: data.columns.map((c) => fieldFor(c, row[c.name] === 'NULL' ? null : row[c.name])).join(''),
+      footer: `<button class="btn" onclick="closeModal()">Batal</button><button class="btn btn-primary" id="dr-save">Simpan</button>`,
+    });
+    $('#dr-save', md).addEventListener('click', async () => {
+      const values = collectValues(data.columns, false);
+      try {
+        await dbAction(`${url}/rows`, 'PUT', { where: wheresOf(row), values });
+        closeModal();
+        toast('Baris diperbarui');
+        loadRows();
+      } catch (e) { toast(e.message, 'error'); }
+    });
+  }
+
+  function insertRowModal() {
+    const md = modal({
+      title: `Baris Baru — ${esc(table)}`,
+      wide: true,
+      body: data.columns.map((c) => fieldFor(c, c.dflt === 'NULL' ? null : c.dflt)).join(''),
+      footer: `<button class="btn" onclick="closeModal()">Batal</button><button class="btn btn-primary" id="dr-insert">Tambah</button>`,
+    });
+    $('#dr-insert', md).addEventListener('click', async () => {
+      const values = collectValues(data.columns, true);
+      try {
+        await dbAction(`${url}/rows`, 'POST', { values });
+        closeModal();
+        toast('Baris ditambahkan');
+        offset.value = 0;
+        loadRows();
+      } catch (e) { toast(e.message, 'error'); }
+    });
+  }
+
+  async function loadRows() {
+    $('#dbr-body').innerHTML = `<div class="empty"><span class="spinner"></span></div>`;
+    const d = await api(`${url}?limit=${DB_ROW_LIMIT}&offset=${offset.value}`).catch((e) => ({ _err: e.message }));
+    if (d._err) { $('#dbr-body').innerHTML = `<div class="empty">${esc(d._err)}</div>`; return; }
+    data.rows = d.rows;
+    data.total = d.total;
+    data.columns = d.columns;
+    data.pk = d.pk;
+    drawRows();
+  }
+
+  $('#dbr-reload').addEventListener('click', () => { offset.value = 0; loadRows(); });
+  $('#dbr-new').addEventListener('click', insertRowModal);
+
+  loadRows();
+}
+
 /* ============ ROUTER ============ */
 const ROUTES = {
   dashboard: { title: 'Dashboard', render: renderDashboard },
   files: { title: 'File Manager', render: renderFiles },
   services: { title: 'Services', render: renderServices },
   sites: { title: 'Websites', render: renderSites },
-  database: { title: 'Database', render: renderDatabase },
+  database: { title: 'Database', render: renderDashboard }, /* di-handle custom di navigate() */
   terminal: { title: 'Web Terminal', render: renderTerminal },
   account: { title: 'Account', render: renderAccount },
 };
@@ -1716,19 +2177,33 @@ function navigate() {
     return;
   }
 
+  if (page === 'db' || (page === 'database' && parts.length > 1)) {
+    // #/database | #/database/svc | #/db/svc/db/table
+    const sub = parts.slice(1).map(decodeURIComponent);
+    $('#page-title').textContent = 'Database';
+    $$('.nav-item').forEach((a) => a.classList.toggle('active', a.dataset.page === 'database'));
+    renderDatabase($('#page-content'), sub);
+    return;
+  }
+
   if (!ROUTES[page]) page = 'dashboard';
   terminalCleanup(page);
   const route = ROUTES[page];
   $('#page-title').textContent = route.title;
   $$('.nav-item').forEach((a) => a.classList.toggle('active', a.dataset.page === page));
-  route.render($('#page-content'));
+  if (page === 'database') {
+    renderDatabase($('#page-content'), []);
+  } else {
+    route.render($('#page-content'));
+  }
 }
-
 function updateAccountUI() {
   if (!ME) return;
-  $('#account-name').textContent = ME.username;
-  $('#account-host').textContent = ME.hostname || '';
-  $('#account-avatar').textContent = (ME.username || '?').slice(0, 1);
+  const displayName = ME.fullName || ME.username;
+  $('#account-name').textContent = displayName;
+  $('#account-host').textContent = ME.username + (ME.hostname ? ` · ${ME.hostname}` : '');
+  $('#account-avatar').textContent = getInitials(displayName);
+  applyTheme(localStorage.getItem('np-theme') || 'light');
   $('#btn-logout').addEventListener('click', async () => {
     await api('/api/auth/logout', { method: 'POST' }).catch(() => {});
     location.href = '/login';
@@ -1737,7 +2212,8 @@ function updateAccountUI() {
 
 async function boot() {
   try {
-    ME = await api('/api/auth/me');
+    const res = await api('/api/auth/me');
+    ME = res.user;
     ME.hostname = location.hostname;
   } catch {
     return; // api() sudah redirect ke /login saat 401

@@ -2,10 +2,23 @@ const express = require('express');
 const fs = require('fs');
 const os = require('os');
 const { execFile } = require('child_process');
+const auth = require('../auth');
 
 const router = express.Router();
 
 const SYSTEM_SHELLS = ['/usr/sbin/nologin', '/sbin/nologin', '/bin/false'];
+const MIN_UID = Number(process.env.PANEL_MIN_UID || 1000);
+const NAME_RE = /^[a-z_][a-z0-9_-]{0,31}$/i;
+
+function managedUser(name) {
+  if (!NAME_RE.test(String(name || ''))) return null;
+  return readPasswd().find((u) => u.name === name && u.uid >= MIN_UID) || null;
+}
+
+function sudoGroupName() {
+  const groups = readGroup();
+  return (groups.find((g) => ['sudo', 'wheel', 'admin'].includes(g.name)) || {}).name || null;
+}
 
 function exec(cmd, args, options = {}) {
   const needsRoot = typeof process.getuid === 'function' && process.getuid() !== 0;
@@ -55,10 +68,10 @@ function isSudo(groups) {
   return ['sudo', 'wheel', 'admin'].some((g) => groups.includes(g));
 }
 
-router.get('/', async (req, res) => {
+router.get('/', auth.requireAdmin, async (req, res) => {
   try {
     const passwd = readPasswd();
-    const users = passwd.filter((u) => u.uid >= (process.env.PANEL_MIN_UID ? Number(process.env.PANEL_MIN_UID) : 1000));
+    const users = passwd.filter((u) => u.uid >= MIN_UID);
     const names = users.map((u) => u.name);
     const states = await lockStates(names);
     const result = users.map((u) => {
@@ -82,26 +95,41 @@ router.get('/', async (req, res) => {
   }
 });
 
-const NAME_RE = /^[a-z_][a-z0-9_-]{0,31}$/i;
-
-router.post('/', async (req, res) => {
+router.post('/', auth.requireAdmin, async (req, res) => {
   const b = req.body || {};
   try {
     if (!NAME_RE.test(b.name || '')) return res.status(400).json({ error: 'Nama akun tidak valid (huruf/angka/_)' });
     if (readPasswd().some((u) => u.name === b.name)) return res.status(409).json({ error: 'Nama akun sudah dipakai' });
+    if (!b.password || String(b.password).length < 8) return res.status(400).json({ error: 'Password wajib diisi (minimal 8 karakter)' });
+    if (/[:\\r\\n]/.test(String(b.password))) return res.status(400).json({ error: 'Password tidak boleh mengandung titik dua atau baris baru' });
 
-    const args = ['-m'];
-    if (b.gecos) args.push('-c', String(b.gecos));
-    if (b.shell) args.push('-s', String(b.shell));
-    else args.push('-s', '/bin/bash');
-    if (b.groups && String(b.groups).trim()) args.push('-G', String(b.groups).trim());
-    else args.push('-G', 'users');
+    const shell = String(b.shell || '/bin/bash');
+    const validShells = fs.existsSync('/etc/shells')
+      ? fs.readFileSync('/etc/shells', 'utf8').split('\n').map((v) => v.trim()).filter((v) => v.startsWith('/'))
+      : ['/bin/bash', '/bin/sh'];
+    if (!validShells.includes(shell) || SYSTEM_SHELLS.includes(shell)) return res.status(400).json({ error: 'Shell tidak valid atau tidak dapat digunakan untuk login' });
+
+    const groups = String(b.groups || '').trim();
+    if (groups) {
+      const available = new Set(readGroup().map((g) => g.name));
+      const requested = groups.split(',').map((g) => g.trim()).filter(Boolean);
+      if (!requested.length || requested.some((g) => !/^[a-zA-Z0-9_.-]+$/.test(g) || !available.has(g))) {
+        return res.status(400).json({ error: 'Satu atau beberapa grup tidak valid / tidak tersedia' });
+      }
+      if (!b.sudo && requested.some((g) => ['sudo', 'wheel', 'admin'].includes(g))) {
+        return res.status(400).json({ error: 'Gunakan opsi akses sudo untuk memberi hak administrator' });
+      }
+    }
+
+    const args = ['-m', '-s', shell];
+    if (b.gecos) args.push('-c', String(b.gecos).slice(0, 200));
+    if (groups) args.push('-G', groups);
     args.push('--', b.name);
 
     let r = await runRoot('useradd', args);
     if (r.code !== 0) return res.status(500).json({ error: (r.stderr || 'useradd gagal').trim() });
 
-    if (b.password) {
+    {
       const pr = await new Promise((resolve) => {
         const { spawn } = require('child_process');
         const needsRoot = typeof process.getuid === 'function' && process.getuid() !== 0;
@@ -112,11 +140,22 @@ router.post('/', async (req, res) => {
         child.stdin.write(`${b.name}:${b.password}\n`);
         child.stdin.end();
       });
-      if (pr.code !== 0) return res.status(500).json({ error: (pr.stderr || 'gagal set password').trim() });
+      if (pr.code !== 0) {
+        await runRoot('userdel', ['-r', '--', b.name]);
+        return res.status(500).json({ error: (pr.stderr || 'gagal set password; akun dibatalkan').trim() });
+      }
     }
     if (b.sudo) {
-      const s = await runRoot('usermod', ['-aG', 'sudo', b.name]);
-      if (s.code !== 0) return res.status(500).json({ error: (s.stderr || 'gagal set sudo').trim() });
+      const group = sudoGroupName();
+      if (!group) {
+        await runRoot('userdel', ['-r', '--', b.name]);
+        return res.status(500).json({ error: 'Grup sudo/wheel tidak ditemukan; akun dibatalkan' });
+      }
+      const s = await runRoot('usermod', ['-aG', group, '--', b.name]);
+      if (s.code !== 0) {
+        await runRoot('userdel', ['-r', '--', b.name]);
+        return res.status(500).json({ error: (s.stderr || 'gagal set sudo; akun dibatalkan').trim() });
+      }
     }
     res.json({ ok: true });
   } catch (e) {
@@ -124,12 +163,12 @@ router.post('/', async (req, res) => {
   }
 });
 
-router.put('/:name', async (req, res) => {
+router.put('/:name', auth.requireAdmin, async (req, res) => {
   const name = req.params.name;
   const b = req.body || {};
   try {
-    const exists = readPasswd().find((u) => u.name === name);
-    if (!exists) return res.status(404).json({ error: 'Akun tidak ditemukan' });
+    const exists = managedUser(name);
+    if (!exists) return res.status(404).json({ error: 'Akun tidak ditemukan atau akun sistem dilindungi' });
 
     const mods = [];
     if (b.gecos !== undefined) mods.push(['-c', String(b.gecos)]);
@@ -142,11 +181,13 @@ router.put('/:name', async (req, res) => {
 
     if (b.sudo !== undefined) {
       if (b.sudo) {
-        const r = await runRoot('usermod', ['-aG', 'sudo', '--', name]);
+        const group = sudoGroupName();
+        if (!group) return res.status(400).json({ error: 'Grup sudo/wheel tidak ditemukan' });
+        const r = await runRoot('usermod', ['-aG', group, '--', name]);
         if (r.code !== 0) return res.status(500).json({ error: (r.stderr || 'gagal set sudo').trim() });
       } else {
         const groups = readGroup();
-        const sudoGroup = (groups.find((g) => ['sudo', 'wheel', 'admin'].includes(g.name)) || {}).name;
+        const sudoGroup = sudoGroupName();
         if (sudoGroup) {
           const keep = groups.filter((g) => g.members.includes(name)).map((g) => g.name).filter((g) => g !== sudoGroup);
           const r = await runRoot('usermod', ['-G', keep.join(','), '--', name]);
@@ -161,6 +202,9 @@ router.put('/:name', async (req, res) => {
     }
 
     if (b.password) {
+      if (String(b.password).length < 8 || /[:\\r\\n]/.test(String(b.password))) {
+        return res.status(400).json({ error: 'Password minimal 8 karakter dan tidak boleh mengandung titik dua / baris baru' });
+      }
       const { spawn } = require('child_process');
       const needsRoot = typeof process.getuid === 'function' && process.getuid() !== 0;
       const pr = await new Promise((resolve) => {
@@ -179,11 +223,11 @@ router.put('/:name', async (req, res) => {
   }
 });
 
-router.delete('/:name', async (req, res) => {
+router.delete('/:name', auth.requireAdmin, async (req, res) => {
   const name = req.params.name;
   try {
     if (name === req.user) return res.status(400).json({ error: 'Tidak bisa menghapus akun yang sedang login' });
-    if (!readPasswd().some((u) => u.name === name)) return res.status(404).json({ error: 'Akun tidak ditemukan' });
+    if (!managedUser(name)) return res.status(404).json({ error: 'Akun tidak ditemukan atau akun sistem dilindungi' });
     const cmdArgs = req.query.removeHome === '1' ? ['-r', '--'] : ['--'];
     const r = await runRoot('userdel', cmdArgs.concat(name));
     if (r.code !== 0) return res.status(500).json({ error: (r.stderr || 'userdel gagal').trim() });
