@@ -129,7 +129,7 @@ html, body {
   box-shadow: 0 12px 48px rgba(0,0,0,0.08);
 }
 
-.login-logo { display: flex; align-items: center; gap: 10px; margin-bottom: 28px; }
+.login-logo { display: flex; align-items: center; justify-content: center; gap: 10px; margin-bottom: 28px; width: 100% }
 .login-title { font-size: 20px; font-weight: 700; letter-spacing: -0.02em; margin-bottom: 4px; }
 .login-sub { font-size: 13px; color: var(--muted); margin-bottom: 24px; }
 .login-form { display: flex; flex-direction: column; }
