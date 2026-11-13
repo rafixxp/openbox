@@ -536,6 +536,22 @@ pre.code {
 :root[data-theme="dark"] .toast.error { background:#9e3038; color:#fff; }
 :root[data-theme="dark"] .row-selected { background:#f2f3f4!important; color:#111315!important; }
 :root[data-theme="dark"] .row-selected a,:root[data-theme="dark"] .row-selected .muted { color:#111315!important; }
+/*======== no 6+++=========*/
+:root[data-theme="dark"] .btn-primary:hover { background:#d6d8da; }
+:root[data-theme="dark"] .login-card { box-shadow:0 12px 48px rgba(0,0,0,.5); }
+:root[data-theme="dark"] .modal-overlay { background:rgba(0,0,0,.6); }
+:root[data-theme="dark"] .modal { box-shadow:0 20px 60px rgba(0,0,0,.5); }
+:root[data-theme="dark"] .cm-keyword { color:#c792ea; }
+:root[data-theme="dark"] .cm-atom, :root[data-theme="dark"] .cm-builtin { color:#a78bfa; }
+:root[data-theme="dark"] .cm-number { color:#7fdbca; }
+:root[data-theme="dark"] .cm-def, :root[data-theme="dark"] .cm-header, :root[data-theme="dark"] .cm-link, :root[data-theme="dark"] .cm-attribute { color:#82aaff; }
+:root[data-theme="dark"] .cm-variable-2 { color:#7cb7ff; }
+:root[data-theme="dark"] .cm-variable-3, :root[data-theme="dark"] .cm-tag { color:#6fd28f; }
+:root[data-theme="dark"] .cm-comment { color:#d9a066; }
+:root[data-theme="dark"] .cm-string, :root[data-theme="dark"] .cm-string-2 { color:#ff9d8a; }
+:root[data-theme="dark"] .cm-meta, :root[data-theme="dark"] .cm-qualifier { color:#9aa3ab; }
+:root[data-theme="dark"] .cm-bracket { color:#c8b97a; }
+/*======== no 6+++=========*/
 @media (max-width:700px) {
   .theme-options { grid-template-columns:1fr; }
   .profile-avatar { width:48px;height:48px;border-radius:14px; }

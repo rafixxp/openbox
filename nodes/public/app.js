@@ -44,22 +44,38 @@ function esc(s) {
 }
 
 function getInitials(value) {
-  const words = String(value || '').trim().split(/\\s+/).filter(Boolean);
+  const words = String(value || '').trim().split(/\s+/).filter(Boolean);
   if (!words.length) return '?';
   return (words.length === 1 ? words[0].slice(0, 2) : words.slice(0, 2).map((w) => w[0]).join('')).toUpperCase();
+}
+
+// upi
+function getTheme() {
+  let saved = null;
+  try { saved = localStorage.getItem('np-theme'); } catch (_) {}
+  if (saved === 'dark' || saved === 'light') return saved;
+  return window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
+}
+
+function termTheme(theme) {
+  return theme === 'dark'
+    ? { background: '#111315', foreground: '#f2f3f4', cursor: '#f2f3f4', cursorAccent: '#111315', selectionBackground: '#41484f' }
+    : { background: '#ffffff', foreground: '#000000', cursor: '#000000', cursorAccent: '#ffffff', selectionBackground: '#d0d0d0' };
 }
 
 function applyTheme(theme) {
   const selected = theme === 'dark' ? 'dark' : 'light';
   document.documentElement.dataset.theme = selected;
-  localStorage.setItem('np-theme', selected);
+  try { localStorage.setItem('np-theme', selected); } catch (_) {}
   const label = $('#theme-current');
   if (label) label.textContent = selected === 'dark' ? 'Dark Mode' : 'Light Mode';
   $$('[data-theme-choice]').forEach((button) => {
     button.classList.toggle('active', button.dataset.themeChoice === selected);
     button.setAttribute('aria-pressed', String(button.dataset.themeChoice === selected));
   });
+  if (window.__npTerm) { try { window.__npTerm.options.theme = termTheme(selected); } catch (_) {} }
 }
+//up
 
 function modal({ title, body, footer, wide }) {
   const root = $('#modal-root');
@@ -894,8 +910,8 @@ async function renderAccount(el) {
   }
 
   $$('[data-theme-choice]').forEach((button) => button.addEventListener('click', () => applyTheme(button.dataset.themeChoice)));
-  applyTheme(localStorage.getItem('np-theme') || 'light');
-
+  applyTheme(getTheme());
+//upi
   $('#pw-save').addEventListener('click', async () => {
     const current = $('#pw-current').value;
     const next = $('#pw-new').value;
@@ -1671,8 +1687,8 @@ async function renderTerminal(el) {
       })();
     });
   }
-
-  function init() {
+//upi 
+   function init() {
     try { termSocket && termSocket.close(); } catch {}
     try { term && term.dispose(); } catch {}
     const container = $('#term-container');
@@ -1681,18 +1697,13 @@ async function renderTerminal(el) {
       cursorBlink: true,
       fontSize: 13,
       fontFamily: 'ui-monospace, Menlo, Consolas, monospace',
-      theme: {
-        background: '#ffffff',
-        foreground: '#000000',
-        cursor: '#000000',
-        cursorAccent: '#ffffff',
-        selectionBackground: '#d0d0d0',
-      },
+      theme: termTheme(getTheme()),
     });
+    window.__npTerm = term;
     const fit = new window.FitAddon.FitAddon();
     term.loadAddon(fit);
     term.open(container);
-    fit.fit();
+    fit.fit();//ip
 
     const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
     termSocket = new WebSocket(`${proto}//${location.host}/terminal`);
@@ -2203,7 +2214,7 @@ function updateAccountUI() {
   $('#account-name').textContent = displayName;
   $('#account-host').textContent = ME.username + (ME.hostname ? ` · ${ME.hostname}` : '');
   $('#account-avatar').textContent = getInitials(displayName);
-  applyTheme(localStorage.getItem('np-theme') || 'light');
+  applyTheme(getTheme());//upi d
   $('#btn-logout').addEventListener('click', async () => {
     await api('/api/auth/logout', { method: 'POST' }).catch(() => {});
     location.href = '/login';
