@@ -1,0 +1,1830 @@
+'use strict'
+
+/* eslint no-prototype-builtins: 0 */
+
+const { RefResolver } = require('json-schema-ref-resolver')
+const { MergeError } = require('@fastify/merge-json-schemas')
+
+const Serializer = require('./lib/serializer')
+const Validator = require('./lib/validator')
+const Location = require('./lib/location')
+const validate = require('./lib/schema-validator')
+const mergeSchemas = require('./lib/merge-schemas')
+
+const DEFAULT_MAX_DEPTH = 100
+const NAMED_FRAGMENT_REF = /^#[a-z_][-\w._]*$/i
+
+// Minimum array lengths at which copying into a plain array and
+// calling native JSON.stringify beats the generated per-item loop. Measured
+// against main with tinybench (alternating rounds, median ops/s, output
+// consumed with Buffer.byteLength) on Node 20, 22, 24 and 26 x64.
+//
+// Node 22+: floats win from 32 elements, but integer-valued elements under a
+// `number` schema only break even around 100 on Node 26 (-25% at 32), and a
+// `number` schema cannot tell the two apart at build time, so numbers wait
+// for 128. Integers win from 512 because small-int ToString is cached, so
+// the loop is already cheap below that.
+//
+// Node 20: JSON.stringify only beats the loop for every element kind from
+// ~3e5 (1e5 is machine-dependent), so both kinds wait for 3e5 there.
+//
+// Strings: the generated loop escapes each element in JS (asString), which
+// is far slower than the native serializer, so the copy wins almost
+// immediately. Node 22+: from 2 elements for every string length and content
+// (2-6x faster from 8 elements on). Node 20: from 32 elements for short
+// strings, but only from 128 for long (~120 chars) strings without escapes,
+// so Node 20 waits for 128. Measured on Node 20, 22, 24 and 26 (arm64) with
+// 8, 40 and 120 char strings, with and without characters to escape.
+//
+// Booleans never win and keep the loop. The array lookup instead of a
+// ternary keeps both branches covered on every Node.
+// TODO: drop the Node 20 tier (and this version check) once Node 20 is no
+// longer supported.
+const nodeMajor = Number.parseInt(process.versions.node, 10)
+const PRIMITIVE_FAST_PATH_MIN_LENGTH = [{ integer: 3e5, number: 3e5, string: 128 }, { integer: 512, number: 128, string: 8 }][+(nodeMajor >= 22)]
+const STRING_ARRAY_FAST_PATH_MIN_LENGTH = PRIMITIVE_FAST_PATH_MIN_LENGTH.string
+const INTEGER_ARRAY_FAST_PATH = { condition: 'Number.isInteger(v)', minLength: PRIMITIVE_FAST_PATH_MIN_LENGTH.integer }
+const NUMBER_ARRAY_FAST_PATH = { condition: 'typeof v === \'number\' && v === v', minLength: PRIMITIVE_FAST_PATH_MIN_LENGTH.number }
+
+const singleSchemaKeywords = [
+  'additionalItems',
+  'additionalProperties',
+  'contains',
+  'else',
+  'if',
+  'not',
+  'propertyNames',
+  'then'
+]
+
+const arraySchemaKeywords = [
+  'allOf',
+  'anyOf',
+  'oneOf'
+]
+
+const objectSchemaKeywords = [
+  'definitions',
+  'patternProperties',
+  'properties'
+]
+
+const serializerFns = `
+const {
+  asString,
+  asNumber,
+  asBoolean,
+  asDateTime,
+  asDate,
+  asTime,
+  asUnsafeString,
+  asPlainStringArray
+} = serializer
+
+const asInteger = serializer.asInteger.bind(serializer)
+
+`
+
+const validRoundingMethods = new Set([
+  'floor',
+  'ceil',
+  'round',
+  'trunc'
+])
+
+const validLargeArrayMechanisms = new Set([
+  'default',
+  'json-stringify'
+])
+
+// Keywords that do not change the output, so a $ref carrying only these
+// can still be dereferenced directly instead of merged with its target.
+const IGNORED_REF_SIBLING_KEYWORDS = new Set([
+  '$ref',
+  '$comment',
+  'title',
+  'description',
+  'examples',
+  'deprecated',
+  'readOnly',
+  'writeOnly'
+])
+
+let schemaIdCounter = 0
+
+function getMaxDepth (options) {
+  const maxDepth = options.maxDepth === undefined ? DEFAULT_MAX_DEPTH : options.maxDepth
+  if (!Number.isInteger(maxDepth) || maxDepth < 0 || maxDepth > DEFAULT_MAX_DEPTH) {
+    throw new Error(`Unsupported max schema depth ${maxDepth}. Expected an integer between 0 and ${DEFAULT_MAX_DEPTH}.`)
+  }
+  return maxDepth
+}
+
+function schemaDepthError (maxDepth, name) {
+  const prefix = name ? `"${name}" ` : ''
+  return new Error(`${prefix}schema exceeds maximum depth of ${maxDepth}`)
+}
+
+function assertObjectDepth (schema, maxDepth, name) {
+  const stack = [{ value: schema, depth: 0, exit: false }]
+  const path = new WeakSet()
+  let hasRef = false
+
+  while (stack.length > 0) {
+    const entry = stack.pop()
+    const value = entry.value
+
+    if (typeof value !== 'object' || value === null) continue
+
+    // Schema maps and arrays add at most one container between schema nodes.
+    // Keep dependency traversals within the same stack-safety envelope while
+    // still allowing maxDepth schema nodes nested through `properties`.
+    if (entry.depth > maxDepth * 2) {
+      throw schemaDepthError(maxDepth, name)
+    }
+
+    if (entry.exit) {
+      path.delete(value)
+      continue
+    }
+
+    if (path.has(value)) {
+      throw new Error('schema contains a circular object reference; use $ref instead')
+    }
+    path.add(value)
+    stack.push({ value, depth: entry.depth, exit: true })
+
+    for (const key in value) {
+      const child = value[key]
+      if (key === '$ref' && typeof child === 'string') {
+        hasRef = true
+      }
+      // Primitive values cannot contain cycles or contribute object depth.
+      // Avoid allocating stack entries that the next iteration would discard.
+      if (typeof child === 'object' && child !== null) {
+        stack.push({ value: child, depth: entry.depth + 1, exit: false })
+      }
+    }
+  }
+
+  return hasRef
+}
+
+function assertSchemaDepth (schema, maxDepth, name) {
+  const stack = [{ schema, depth: 0 }]
+
+  while (stack.length > 0) {
+    const entry = stack.pop()
+    const currentSchema = entry.schema
+
+    if (entry.depth > maxDepth) {
+      throw schemaDepthError(maxDepth, name)
+    }
+
+    if (typeof currentSchema !== 'object' || currentSchema === null) continue
+
+    const nestedDepth = entry.depth + 1
+
+    for (const keyword of singleSchemaKeywords) {
+      if (typeof currentSchema[keyword] === 'object' && currentSchema[keyword] !== null) {
+        stack.push({ schema: currentSchema[keyword], depth: nestedDepth })
+      }
+    }
+
+    for (const keyword of arraySchemaKeywords) {
+      const schemas = currentSchema[keyword]
+      if (Array.isArray(schemas)) {
+        for (const nestedSchema of schemas) {
+          stack.push({ schema: nestedSchema, depth: nestedDepth })
+        }
+      }
+    }
+
+    const items = currentSchema.items
+    if (Array.isArray(items)) {
+      for (const nestedSchema of items) {
+        stack.push({ schema: nestedSchema, depth: nestedDepth })
+      }
+    } else if (typeof items === 'object' && items !== null) {
+      stack.push({ schema: items, depth: nestedDepth })
+    }
+
+    for (const keyword of objectSchemaKeywords) {
+      const schemas = currentSchema[keyword]
+      if (typeof schemas === 'object' && schemas !== null) {
+        for (const key of Object.keys(schemas)) {
+          stack.push({ schema: schemas[key], depth: nestedDepth })
+        }
+      }
+    }
+
+    const dependencies = currentSchema.dependencies
+    if (typeof dependencies === 'object' && dependencies !== null) {
+      for (const key of Object.keys(dependencies)) {
+        const dependency = dependencies[key]
+        if (!Array.isArray(dependency)) {
+          stack.push({ schema: dependency, depth: nestedDepth })
+        }
+      }
+    }
+  }
+}
+
+function isValidSchema (schema, name) {
+  if (!validate(schema)) {
+    if (name) {
+      name = `"${name}" `
+    } else {
+      name = ''
+    }
+    const first = validate.errors[0]
+    const err = new Error(`${name}schema is invalid: data${first.instancePath} ${first.message}`)
+    err.errors = isValidSchema.errors
+    throw err
+  }
+}
+
+function resolveRef (context, location) {
+  const seen = new Set()
+  const siblingLocations = []
+  let depth = 0
+
+  while (location.schema.$ref !== undefined) {
+    const refSchema = location.schema
+    const ref = refSchema.$ref
+    const locationRef = location.getSchemaRef()
+
+    if (seen.has(locationRef)) {
+      throw new Error(`Cannot resolve circular reference "${ref}"`)
+    }
+    seen.add(locationRef)
+
+    if (depth++ > context.maxDepth) {
+      throw schemaDepthError(context.maxDepth)
+    }
+
+    let hashIndex = ref.indexOf('#')
+    if (hashIndex === -1) {
+      hashIndex = ref.length
+    }
+
+    const schemaId = ref.slice(0, hashIndex) || location.schemaId
+    const jsonPointer = ref.slice(hashIndex) || '#'
+
+    const schema = context.refResolver.getSchema(schemaId, jsonPointer)
+    if (schema === null) {
+      throw new Error(`Cannot find reference "${ref}"`)
+    }
+
+    const siblingSchema = {}
+    for (const key in refSchema) {
+      if (!IGNORED_REF_SIBLING_KEYWORDS.has(key)) {
+        siblingSchema[key] = refSchema[key]
+      }
+    }
+
+    if (Object.keys(siblingSchema).length !== 0) {
+      siblingLocations.unshift(new Location(
+        cloneOriginSchema(context, siblingSchema, location.schemaId),
+        location.schemaId,
+        location.jsonPointer
+      ))
+    }
+
+    location = new Location(schema, schemaId, jsonPointer)
+  }
+
+  if (siblingLocations.length === 0) {
+    return location
+  }
+
+  // Keyed by content, not by identity: a merged schema is cloned on every
+  // merge, so a recursive $ref would otherwise be merged again on each level.
+  const mergedSchemaKey = location.getSchemaRef() + JSON.stringify(siblingLocations.map((l) => l.schema))
+
+  let mergedSchemaId = context.mergedRefsIds.get(mergedSchemaKey)
+  if (mergedSchemaId === undefined) {
+    mergedSchemaId = `__fjs_merged_${schemaIdCounter++}`
+    try {
+      mergeLocations(context, mergedSchemaId, [location, ...siblingLocations])
+    } catch (err) {
+      if (!(err instanceof MergeError)) throw err
+      return location
+    }
+    context.mergedRefsIds.set(mergedSchemaKey, mergedSchemaId)
+  }
+
+  return getMergedLocation(context, mergedSchemaId)
+}
+
+function getSchemaDependencies (refResolver, schemaId) {
+  const dependencies = {}
+  const processed = new Set()
+  const pending = [schemaId]
+
+  while (pending.length > 0) {
+    const currentSchemaId = pending.pop()
+    if (processed.has(currentSchemaId)) continue
+    processed.add(currentSchemaId)
+
+    for (const ref of refResolver.getSchemaRefs(currentSchemaId)) {
+      const dependencySchemaId = ref.schemaId
+      if (
+        dependencySchemaId === currentSchemaId ||
+        dependencies[dependencySchemaId] !== undefined
+      ) continue
+
+      dependencies[dependencySchemaId] = refResolver.getSchema(dependencySchemaId)
+      pending.push(dependencySchemaId)
+    }
+  }
+
+  return dependencies
+}
+
+function getMergedLocation (context, mergedSchemaId) {
+  const mergedSchema = context.refResolver.getSchema(mergedSchemaId, '#')
+  return new Location(mergedSchema, mergedSchemaId, '#')
+}
+
+function getSchemaId (schema, rootSchemaId) {
+  if (schema.$id && schema.$id.charAt(0) !== '#') {
+    return schema.$id
+  }
+  return rootSchemaId
+}
+
+// a schema ref on a comment line of the generated code: a line terminator in a property name
+// would end the comment and turn the rest of the name into code. JSON.stringify covers \n and
+// \r, the two separators JS also treats as line terminators are escaped by hand
+const LINE_SEPARATORS = /[\u2028\u2029]/g
+function asComment (schemaRef) {
+  return JSON.stringify(schemaRef).replace(LINE_SEPARATORS, (c) => '\\u' + c.charCodeAt(0).toString(16))
+}
+
+function getSafeSchemaRef (context, location) {
+  let schemaRef = location.getSchemaRef() || ''
+  if (schemaRef.startsWith(context.rootSchemaId)) {
+    schemaRef = schemaRef.replace(context.rootSchemaId, '') || '#'
+  }
+  return schemaRef
+}
+
+function getValidatorSchemaRef (context, location) {
+  let schemaRef = location.getSchemaRef()
+  const schema = location.schema
+
+  // A schema that is only a registered $ref can validate against that target
+  // instead of a JSON-pointer path through the root schema.
+  if (
+    typeof schema.$ref !== 'string' ||
+    Object.keys(schema).length !== 1
+  ) {
+    return schemaRef
+  }
+
+  const ref = schema.$ref
+  const hashIndex = ref.indexOf('#')
+  const refSchemaId = hashIndex === -1 ? ref : ref.slice(0, hashIndex)
+  const refJsonPointer = hashIndex === -1 ? '' : ref.slice(hashIndex)
+  const isBareRef = refJsonPointer === '' || refJsonPointer === '#'
+  const isNamedFragmentRef = NAMED_FRAGMENT_REF.test(refJsonPointer)
+  const isJsonPointerRef = refJsonPointer.startsWith('#/')
+
+  if (
+    (isBareRef || isNamedFragmentRef || isJsonPointerRef) &&
+    refSchemaId &&
+    context.refResolver.hasSchema(refSchemaId)
+  ) {
+    const refSchema = context.refResolver.getSchema(refSchemaId)
+    const refSubSchema = isBareRef
+      ? refSchema
+      : context.refResolver.getSchema(refSchemaId, refJsonPointer)
+    const hasRelativeSchemaId = (
+      typeof refSchema.$id === 'string' &&
+      refSchema.$id.charAt(0) === '#'
+    )
+    if (
+      refSubSchema !== null &&
+      (!hasRelativeSchemaId || refSchema.$id === refJsonPointer)
+    ) {
+      schemaRef = refSchemaId + (isBareRef ? '#' : refJsonPointer)
+    }
+  }
+
+  return schemaRef
+}
+
+function build (schema, options) {
+  options = options || {}
+
+  const maxDepth = getMaxDepth(options)
+  // assertObjectDepth also reports whether any $ref appears; recursive-schema
+  // detection is only needed when $ref can form cycles.
+  let hasRef = assertObjectDepth(schema, maxDepth)
+  assertSchemaDepth(schema, maxDepth)
+  isValidSchema(schema)
+
+  const context = {
+    functions: [],
+    functionsCounter: 0,
+    functionsNamesBySchema: new Map(),
+    options,
+    refResolver: new RefResolver(),
+    rootSchemaId: schema.$id || `__fjs_root_${schemaIdCounter++}`,
+    validatorSchemasIds: new Set(),
+    validatorSchemaRefs: new Set(),
+    mergedSchemasIds: new Map(),
+    mergedRefsIds: new Map(),
+    maxDepth,
+    recursiveSchemas: new Set(),
+    recursivePaths: new Set(),
+    buildingSet: new Set(),
+    largeArraySize: 2e4,
+    largeArrayMechanism: 'default',
+    uid: 0
+  }
+
+  const schemaId = getSchemaId(schema, context.rootSchemaId)
+  if (!context.refResolver.hasSchema(schemaId)) {
+    context.refResolver.addSchema(schema, context.rootSchemaId)
+  }
+
+  if (options.schema) {
+    for (const key in options.schema) {
+      const schema = options.schema[key]
+      const schemaId = getSchemaId(schema, key)
+      if (!context.refResolver.hasSchema(schemaId)) {
+        if (assertObjectDepth(schema, maxDepth, key)) {
+          hasRef = true
+        }
+        assertSchemaDepth(schema, maxDepth, key)
+        isValidSchema(schema, key)
+        context.refResolver.addSchema(schema, key)
+      }
+    }
+  }
+
+  if (options.rounding) {
+    if (!validRoundingMethods.has(options.rounding)) {
+      throw new Error(`Unsupported integer rounding method ${options.rounding}`)
+    }
+  }
+
+  if (options.largeArrayMechanism) {
+    if (validLargeArrayMechanisms.has(options.largeArrayMechanism)) {
+      context.largeArrayMechanism = options.largeArrayMechanism
+    } else {
+      throw new Error(`Unsupported large array mechanism ${options.largeArrayMechanism}`)
+    }
+  }
+
+  if (options.largeArraySize) {
+    const largeArraySizeType = typeof options.largeArraySize
+    let parsedNumber
+
+    if (largeArraySizeType === 'string' && Number.isFinite((parsedNumber = Number.parseInt(options.largeArraySize, 10)))) {
+      context.largeArraySize = parsedNumber
+    } else if (largeArraySizeType === 'number' && Number.isInteger(options.largeArraySize)) {
+      context.largeArraySize = options.largeArraySize
+    } else if (largeArraySizeType === 'bigint') {
+      context.largeArraySize = Number(options.largeArraySize)
+    } else {
+      throw new Error(`Unsupported large array size. Expected integer-like, got ${typeof options.largeArraySize} with value ${options.largeArraySize}`)
+    }
+  }
+
+  const location = new Location(schema, context.rootSchemaId)
+  // Without $ref, json-pointer paths are unique in a tree walk, so no cycle
+  // can appear in recursivePaths. Skip the third full-schema traversal.
+  if (hasRef) {
+    detectRecursiveSchemas(context, location)
+  }
+  const code = buildValue(context, location, 'input')
+
+  let contextFunctionCode = `
+    ${serializerFns}
+    const JSON_STR_BEGIN_OBJECT = '{'
+    const JSON_STR_END_OBJECT = '}'
+    const JSON_STR_BEGIN_ARRAY = '['
+    const JSON_STR_END_ARRAY = ']'
+    const JSON_STR_COMMA = ','
+    const JSON_STR_COLONS = ':'
+    const JSON_STR_QUOTE = '"'
+    const JSON_STR_EMPTY_OBJECT = JSON_STR_BEGIN_OBJECT + JSON_STR_END_OBJECT
+    const JSON_STR_EMPTY_ARRAY = JSON_STR_BEGIN_ARRAY + JSON_STR_END_ARRAY
+    const JSON_STR_EMPTY_STRING = JSON_STR_QUOTE + JSON_STR_QUOTE
+    const JSON_STR_NULL = 'null'
+  `
+
+  // If we have only the invocation of the 'anonymous0' function, we would
+  // basically just wrap the 'anonymous0' function in the 'main' function and
+  // and the overhead of the intermediate variable 'json'. We can avoid the
+  // wrapping and the unnecessary memory allocation by aliasing 'anonymous0' to
+  // 'main'
+  if (code === 'json += anonymous0(input)') {
+    contextFunctionCode += `
+    ${context.functions.join('\n')}
+    const main = anonymous0
+    return main
+    `
+  } else {
+    contextFunctionCode += `
+    function main (input) {
+      let json = ''
+      ${code}
+      return json
+    }
+    ${context.functions.join('\n')}
+    return main
+    `
+  }
+
+  const serializer = new Serializer(options)
+  // Ajv construction dominates tiny build() cost. Only create a Validator when
+  // generated code needs validator.validate (anyOf/oneOf/if-then-else), or when
+  // debug mode exposes the instance. Standalone already emits `validator = null`
+  // when validatorSchemasIds is empty.
+  const needsValidator =
+    context.validatorSchemasIds.size > 0 ||
+    options.mode === 'debug'
+
+  const validator = needsValidator
+    ? new Validator(
+      options.ajv,
+      options.mode === 'standalone' && options.inlineValidators
+    )
+    : null
+
+  if (validator !== null) {
+    for (const schemaId of context.validatorSchemasIds) {
+      const schema = context.refResolver.getSchema(schemaId)
+      validator.addSchema(schema, schemaId)
+
+      const dependencies = getSchemaDependencies(context.refResolver, schemaId)
+      for (const [schemaId, schema] of Object.entries(dependencies)) {
+        validator.addSchema(schema, schemaId)
+      }
+    }
+
+    if (options.compileValidators) {
+      validator.compileSchemas(context.validatorSchemaRefs)
+    }
+  }
+
+  if (options.mode === 'debug') {
+    return {
+      validator,
+      serializer,
+      code: `validator\nserializer\n${contextFunctionCode}`,
+      ajv: validator.ajv
+    }
+  }
+
+  /* eslint no-new-func: "off" */
+  const contextFunc = new Function('validator', 'serializer', contextFunctionCode)
+
+  if (options.mode === 'standalone') {
+    const buildStandaloneCode = require('./lib/standalone')
+    return buildStandaloneCode(contextFunc, context, serializer, validator)
+  }
+
+  return contextFunc(validator, serializer)
+}
+
+const objectKeywords = [
+  'properties',
+  'required',
+  'additionalProperties',
+  'patternProperties',
+  'maxProperties',
+  'minProperties',
+  'dependencies'
+]
+
+const arrayKeywords = [
+  'items',
+  'additionalItems',
+  'maxItems',
+  'minItems',
+  'uniqueItems',
+  'contains'
+]
+
+const stringKeywords = [
+  'maxLength',
+  'minLength',
+  'pattern'
+]
+
+const numberKeywords = [
+  'multipleOf',
+  'maximum',
+  'exclusiveMaximum',
+  'minimum',
+  'exclusiveMinimum'
+]
+
+/**
+ * Infer type based on keyword in order to generate optimized code
+ * https://datatracker.ietf.org/doc/html/draft-handrews-json-schema-validation-01#section-6
+ */
+function inferTypeByKeyword (schema) {
+  for (const keyword of objectKeywords) {
+    if (keyword in schema) return 'object'
+  }
+  for (const keyword of arrayKeywords) {
+    if (keyword in schema) return 'array'
+  }
+  for (const keyword of stringKeywords) {
+    if (keyword in schema) return 'string'
+  }
+  for (const keyword of numberKeywords) {
+    if (keyword in schema) return 'number'
+  }
+  return schema.type
+}
+
+function buildExtraObjectPropertiesSerializer (context, location, addComma, objVar) {
+  const schema = location.schema
+  const propertiesKeys = Object.keys(schema.properties || {})
+
+  let code = `
+    for (const key of Object.keys(${objVar})) {
+      if (
+        ${propertiesKeys.length > 0 ? propertiesKeys.map(k => `key === ${JSON.stringify(k)}`).join(' || ') + ' ||' : ''}
+        ${objVar}[key] === undefined ||
+        typeof ${objVar}[key] === 'function' ||
+        typeof ${objVar}[key] === 'symbol'
+      ) continue
+      const value = ${objVar}[key]
+  `
+
+  const patternPropertiesLocation = location.getPropertyLocation('patternProperties')
+  const patternPropertiesSchema = patternPropertiesLocation.schema
+
+  if (patternPropertiesSchema !== undefined) {
+    for (const propertyKey in patternPropertiesSchema) {
+      const propertyLocation = patternPropertiesLocation.getPropertyLocation(propertyKey)
+
+      code += `
+        if (/${propertyKey.replace(/\\*\//g, '\\/')}/.test(key)) {
+          ${addComma}
+          json += asString(key) + JSON_STR_COLONS
+          ${buildValue(context, propertyLocation, 'value')}
+          continue
+        }
+      `
+    }
+  }
+
+  const additionalPropertiesLocation = location.getPropertyLocation('additionalProperties')
+  const additionalPropertiesSchema = additionalPropertiesLocation.schema
+
+  // `additionalProperties: false` means every property that is not declared in
+  // `properties` nor matched by `patternProperties` is dropped, so no branch is
+  // emitted for it. Without this guard the `false` schema reaches buildValue,
+  // which serializes any boolean schema with `JSON.stringify(value)` and lets
+  // the property through.
+  if (additionalPropertiesSchema !== undefined && additionalPropertiesSchema !== false) {
+    if (additionalPropertiesSchema === true) {
+      code += `
+        ${addComma}
+        json += asString(key) + JSON_STR_COLONS + JSON.stringify(value)
+      `
+    } else {
+      const propertyLocation = location.getPropertyLocation('additionalProperties')
+      code += `
+        ${addComma}
+        json += asString(key) + JSON_STR_COLONS
+        ${buildValue(context, propertyLocation, 'value')}
+      `
+    }
+  }
+
+  code += `
+    }
+  `
+  return code
+}
+
+function buildInnerObject (context, location, objVar, isReturnForm) {
+  const schema = location.schema
+
+  const propertiesLocation = location.getPropertyLocation('properties')
+  const requiredProperties = schema.required || []
+
+  // Should serialize required properties first
+  const propertiesKeys = Object.keys(schema.properties || {}).sort(
+    (key1, key2) => {
+      const required1 = requiredProperties.includes(key1)
+      const required2 = requiredProperties.includes(key2)
+      return required1 === required2 ? 0 : required1 ? -1 : 1
+    }
+  )
+
+  let code = ''
+
+  for (const key of requiredProperties) {
+    if (!propertiesKeys.includes(key)) {
+      const sanitizedKey = JSON.stringify(key)
+      code += `if (${objVar}[${sanitizedKey}] === undefined) throw new Error('${sanitizedKey.replace(/'/g, '\\\'')} is required!')\n`
+    }
+  }
+
+  const localUid = context.uid++
+  let addComma = ''
+  let emptyObjectGuard = null
+
+  // propertiesKeys is sorted required-first; the guard checks [0] is required because
+  // otherwise additionalProperties/patternProperties would emit a stray `{ ,"k":v }`.
+  if (propertiesKeys.length > 0 && requiredProperties.includes(propertiesKeys[0])) {
+    // The first property is required, so it always emits (or throws): fold the
+    // object-open brace into its key prefix. Subsequent properties fold the
+    // comma into their key prefix the same way, cutting one append per property.
+    for (let i = 0; i < propertiesKeys.length; i++) {
+      const key = propertiesKeys[i]
+      const propertyLocation = propertiesLocation.getPropertyLocation(key)
+
+      let resolvedLocation = propertyLocation
+      if (propertyLocation.schema.$ref) {
+        resolvedLocation = resolveRef(context, propertyLocation)
+      }
+
+      const sanitizedKey = JSON.stringify(key)
+      const value = `value_${key.replace(/[^a-zA-Z0-9]/g, '_')}_${context.uid++}`
+      const defaultValue = resolvedLocation.schema.default
+      const isRequired = requiredProperties.includes(key)
+      const keyPrefix = (i === 0 ? '{' : ',') + sanitizedKey + ':'
+
+      code += `
+      const ${value} = ${objVar}[${sanitizedKey}]
+      if (${value} !== undefined) {
+        json += ${JSON.stringify(keyPrefix)}
+        ${buildValue(context, resolvedLocation, `${value}`)}
+      }`
+
+      if (defaultValue !== undefined) {
+        code += ` else {
+        json += ${JSON.stringify(keyPrefix + JSON.stringify(defaultValue))}
+      }
+      `
+      } else if (isRequired) {
+        code += ` else {
+        throw new Error('${sanitizedKey.replace(/'/g, '\\\'')} is required!')
+      }
+      `
+      } else {
+        code += '\n'
+      }
+    }
+
+    addComma = 'json += JSON_STR_COMMA'
+  } else {
+    // No property is guaranteed to emit: fold `{` into whichever property
+    // emits first, and only emit a bare `{` when none does.
+    const needsRuntimeComma = propertiesKeys.length > 1 || schema.patternProperties || (schema.additionalProperties !== undefined && schema.additionalProperties !== false)
+
+    if (needsRuntimeComma) {
+      code += `let addComma_${localUid} = false\n`
+      addComma = `json += addComma_${localUid} ? JSON_STR_COMMA : ((addComma_${localUid} = true), JSON_STR_BEGIN_OBJECT)`
+      emptyObjectGuard = `if (!addComma_${localUid}) json += JSON_STR_BEGIN_OBJECT\n`
+    } else if (propertiesKeys.length === 0) {
+      code += 'json += JSON_STR_BEGIN_OBJECT\n'
+    }
+
+    for (const key of propertiesKeys) {
+      let propertyLocation = propertiesLocation.getPropertyLocation(key)
+      if (propertyLocation.schema.$ref) {
+        propertyLocation = resolveRef(context, propertyLocation)
+      }
+
+      const sanitizedKey = JSON.stringify(key)
+      const value = `value_${key.replace(/[^a-zA-Z0-9]/g, '_')}_${context.uid++}`
+      const defaultValue = propertyLocation.schema.default
+      const isRequired = requiredProperties.includes(key) // Should be false here but good to keep
+      const keyColon = sanitizedKey + ':'
+      const addProperty = needsRuntimeComma
+        ? `json += addComma_${localUid} ? ${JSON.stringify(',' + keyColon)} : ((addComma_${localUid} = true), ${JSON.stringify('{' + keyColon)})`
+        : `json += ${JSON.stringify('{' + keyColon)}`
+
+      code += `
+          const ${value} = ${objVar}[${sanitizedKey}]
+          if (${value} !== undefined) {
+            ${addProperty}
+            ${buildValue(context, propertyLocation, `${value}`)}
+          }`
+
+      if (defaultValue !== undefined) {
+        const defaultValueLiteral = JSON.stringify(sanitizedKey + ':' + JSON.stringify(defaultValue))
+        if (needsRuntimeComma) {
+          code += ` else {
+            ${addComma}
+            json += ${defaultValueLiteral}
+          }
+          `
+        } else {
+          // Single optional property with default: `{` is folded into the
+          // default literal so the absent branch still opens the object.
+          code += ` else {
+            json += ${JSON.stringify('{' + sanitizedKey + ':' + JSON.stringify(defaultValue))}
+          }
+          `
+        }
+      } else if (isRequired) {
+        // Should not happen if requiredProperties.length === 0 but safety
+        code += ` else {
+            throw new Error('${sanitizedKey.replace(/'/g, '\\\'')} is required!')
+          }
+          `
+      } else if (!needsRuntimeComma) {
+        // Single optional property: `{` is folded into its key, so emit `{`
+        // when the property is absent.
+        code += ` else {
+            json += JSON_STR_BEGIN_OBJECT
+          }
+          `
+      } else {
+        code += '\n'
+      }
+    }
+  }
+
+  if (schema.patternProperties || schema.additionalProperties) {
+    code += buildExtraObjectPropertiesSerializer(context, location, addComma, objVar)
+  }
+
+  if (emptyObjectGuard !== null) {
+    code += emptyObjectGuard
+  }
+
+  // Named object serializers can return `json + '}'` directly, saving one
+  // append + intermediate assignment in the hot per-item path.
+  code += isReturnForm
+    ? '\nreturn json + JSON_STR_END_OBJECT\n'
+    : '\njson += JSON_STR_END_OBJECT\n'
+  return code
+}
+
+function mergeLocations (context, mergedSchemaId, mergedLocations) {
+  for (let i = 0, mergedLocationsLength = mergedLocations.length; i < mergedLocationsLength; i++) {
+    const location = mergedLocations[i]
+    const schema = location.schema
+    if (schema.$ref) {
+      mergedLocations[i] = resolveRef(context, location)
+    }
+  }
+
+  const mergedSchemas = []
+  for (const location of mergedLocations) {
+    const schema = cloneOriginSchema(context, location.schema, location.schemaId)
+    delete schema.$id
+
+    mergedSchemas.push(schema)
+  }
+
+  const mergedSchema = mergeSchemas(mergedSchemas)
+  const mergedLocation = new Location(mergedSchema, mergedSchemaId)
+
+  context.refResolver.addSchema(mergedSchema, mergedSchemaId)
+  return mergedLocation
+}
+
+function cloneOriginSchema (context, schema, schemaId) {
+  const clonedSchema = Array.isArray(schema) ? [] : {}
+
+  if (
+    schema.$id !== undefined &&
+    schema.$id.charAt(0) !== '#'
+  ) {
+    schemaId = schema.$id
+  }
+
+  const mergedSchemaRef = context.mergedSchemasIds.get(schema)
+  if (mergedSchemaRef) {
+    context.mergedSchemasIds.set(clonedSchema, mergedSchemaRef)
+  }
+
+  for (const key in schema) {
+    let value = schema[key]
+
+    if (key === '$ref' && typeof value === 'string' && value.charAt(0) === '#') {
+      value = schemaId + value
+    }
+
+    if (typeof value === 'object' && value !== null) {
+      value = cloneOriginSchema(context, value, schemaId)
+    }
+
+    clonedSchema[key] = value
+  }
+
+  return clonedSchema
+}
+
+function toJSON (variableName) {
+  return `(${variableName} && typeof ${variableName}.toJSON === 'function')
+    ? ${variableName}.toJSON()
+    : ${variableName}
+  `
+}
+
+function buildObject (context, location, input) {
+  const schema = location.schema
+
+  if (context.functionsNamesBySchema.has(schema)) {
+    const funcName = context.functionsNamesBySchema.get(schema)
+    return `json += ${funcName}(${input})`
+  }
+
+  const nullable = schema.nullable === true
+
+  const schemaId = location.schemaId || ''
+  const jsonPointer = location.jsonPointer || ''
+  const fullPath = `${schemaId}#${jsonPointer}`
+
+  if (context.recursivePaths.has(fullPath) || context.buildingSet.has(schema) || schemaId !== '') {
+    const functionName = generateFuncName(context)
+    context.functionsNamesBySchema.set(schema, functionName)
+
+    const schemaRef = getSafeSchemaRef(context, location)
+
+    const functionCode = `
+      // ${asComment(schemaRef)}
+      function ${functionName} (input) {
+        const obj = ${toJSON('input')}
+        if (obj === null) return ${nullable ? 'JSON_STR_NULL' : 'JSON_STR_EMPTY_OBJECT'}
+        let json = ''
+
+        ${buildInnerObject(context, location, 'obj', true)}
+      }
+    `
+
+    context.functions.push(functionCode)
+    return `json += ${functionName}(${input})`
+  }
+
+  context.buildingSet.add(schema)
+  const objVar = `obj_${context.uid++}`
+  const code = `
+    const ${objVar} = ${toJSON(input)}
+    if (${objVar} === null) {
+      json += ${nullable ? 'JSON_STR_NULL' : 'JSON_STR_EMPTY_OBJECT'}
+    } else {
+      ${buildInnerObject(context, location, objVar)}
+    }
+  `
+  context.buildingSet.delete(schema)
+  return code
+}
+
+// Per-element condition under which a native JSON.stringify(array) is
+// byte-identical to the generated per-item serializer for primitive item
+// schemas, plus the minimum array length at which copying beats the existing
+// loop. Returns null when the item schema uses any keyword that changes
+// serialization dispatch, or when the kind never wins (boolean: 'true'/'false'
+// concat is already cheap; the copy loses 25-44% at every size on Node 24).
+function getPrimitiveArrayFastPathCondition (itemsSchema) {
+  if (
+    Array.isArray(itemsSchema) ||
+    itemsSchema.$ref !== undefined ||
+    typeof itemsSchema.type !== 'string' ||
+    itemsSchema.const !== undefined ||
+    itemsSchema.nullable === true ||
+    itemsSchema.allOf !== undefined ||
+    itemsSchema.anyOf !== undefined ||
+    itemsSchema.oneOf !== undefined ||
+    itemsSchema.if !== undefined
+  ) {
+    return null
+  }
+  switch (itemsSchema.type) {
+    case 'number':
+      // asNumber(): NaN throws, Infinity serializes as null, every other
+      // number renders via ToString, exactly like JSON.stringify. The cutoff
+      // is in NUMBER_ARRAY_FAST_PATH.
+      return NUMBER_ARRAY_FAST_PATH
+    case 'integer':
+      // asInteger(): only integer numbers skip the (rounding-dependent)
+      // parseInteger path; those render via ToString like JSON.stringify.
+      // Small-int ToString is cached, so the loop stays cheap for longer;
+      // the cutoff is in INTEGER_ARRAY_FAST_PATH.
+      return INTEGER_ARRAY_FAST_PATH
+    default:
+      return null
+  }
+}
+
+// Item schema { type: 'string' } with no format, nullable, const, or combinator.
+// Other keywords (enum, pattern, minLength) are not applied while serializing.
+function isPlainStringItemsSchema (schema) {
+  if (schema.type !== 'string') {
+    return false
+  }
+  if (schema.format !== undefined) {
+    return false
+  }
+  if (schema.nullable === true) {
+    return false
+  }
+  if (schema.const !== undefined) {
+    return false
+  }
+  if (schema.allOf !== undefined) {
+    return false
+  }
+  if (schema.anyOf !== undefined) {
+    return false
+  }
+  if (schema.oneOf !== undefined) {
+    return false
+  }
+  if (schema.if !== undefined) {
+    return false
+  }
+  return true
+}
+
+function buildArray (context, location, input) {
+  const schema = location.schema
+
+  let itemsLocation = location.getPropertyLocation('items')
+  itemsLocation.schema = itemsLocation.schema || {}
+
+  if (itemsLocation.schema.$ref) {
+    itemsLocation = resolveRef(context, itemsLocation)
+  }
+
+  const itemsSchema = itemsLocation.schema
+  const plainStringFastPath = context.largeArrayMechanism !== 'json-stringify' &&
+    !Array.isArray(itemsSchema) &&
+    isPlainStringItemsSchema(itemsSchema)
+
+  if (context.functionsNamesBySchema.has(schema)) {
+    const funcName = context.functionsNamesBySchema.get(schema)
+    return `json += ${funcName}(${input})`
+  }
+
+  const nullable = schema.nullable === true
+
+  const schemaId = location.schemaId || ''
+  const jsonPointer = location.jsonPointer || ''
+  const fullPath = `${schemaId}#${jsonPointer}`
+
+  if (context.recursivePaths.has(fullPath) || context.buildingSet.has(schema) || schemaId !== '') {
+    const functionName = generateFuncName(context)
+    context.functionsNamesBySchema.set(schema, functionName)
+
+    const schemaRef = getSafeSchemaRef(context, location)
+
+    let functionCode = `
+    function ${functionName} (obj) {
+      // ${asComment(schemaRef)}
+      let json = ''
+  `
+
+    functionCode += `
+    if (obj === null) return ${nullable ? 'JSON_STR_NULL' : 'JSON_STR_EMPTY_ARRAY'}
+    if (!Array.isArray(obj)) {
+      throw new TypeError(${JSON.stringify(`The value of '${schemaRef}' does not match schema definition.`)})
+    }
+    const arrayLength = obj.length
+  `
+
+    if (!schema.additionalItems && Array.isArray(itemsSchema)) {
+      functionCode += `
+      if (arrayLength > ${itemsSchema.length}) {
+        throw new Error(\`Item at ${itemsSchema.length} does not match schema definition.\`)
+      }
+    `
+    }
+
+    if (context.largeArrayMechanism === 'json-stringify') {
+      functionCode += `if (arrayLength >= ${context.largeArraySize}) return JSON.stringify(obj)\n`
+    } else if (plainStringFastPath) {
+      // Copy strings once; the helper resumes ordered coercion on the first miss.
+      functionCode += `
+      if (typeof arrayLength === 'number' && arrayLength >= ${STRING_ARRAY_FAST_PATH_MIN_LENGTH} && Number.isInteger(arrayLength) && arrayLength <= 0xffffffff) {
+        return asPlainStringArray(obj, arrayLength)
+      }
+      `
+    } else {
+      const fastPath = getPrimitiveArrayFastPathCondition(itemsSchema)
+      if (fastPath) {
+        const valueCode = buildValue(context, itemsLocation, 'v')
+        functionCode += `
+        // Copying small arrays costs more than the existing loop.
+        if (typeof arrayLength === 'number' && arrayLength >= ${fastPath.minLength} && Number.isInteger(arrayLength) && arrayLength <= 0xffffffff) {
+          const copy = new Array(arrayLength)
+          // V8's side-effect-free JSON.stringify fast path (V8 >= 13.8) requires
+          // the standard Array.prototype; a null prototype halves its throughput.
+          // Only detach the prototype when a toJSON hook would otherwise be called.
+          if (Array.prototype.toJSON !== undefined) Object.setPrototypeOf(copy, null)
+          for (let i = 0; i < arrayLength; i++) {
+            const v = obj[i]
+            if (!(${fastPath.condition})) {
+              // Serialize the captured prefix, then resume at the first miss.
+              // Never reread getters or read ahead of an item's coercion.
+              copy.length = i
+              json = JSON.stringify(copy).slice(0, -1)
+              if (i > 0) json += JSON_STR_COMMA
+              ${valueCode}
+              for (i++; i < arrayLength; i++) {
+                json += JSON_STR_COMMA
+                const v = obj[i]
+                ${valueCode}
+              }
+              return json + JSON_STR_END_ARRAY
+            }
+            copy[i] = v
+          }
+          return JSON.stringify(copy)
+        }
+      `
+      }
+    }
+
+    functionCode += `
+    json += JSON_STR_BEGIN_ARRAY
+  `
+
+    if (Array.isArray(itemsSchema)) {
+      for (let i = 0, itemsSchemaLength = itemsSchema.length; i < itemsSchemaLength; i++) {
+        let item = itemsSchema[i]
+        let itemLocation = itemsLocation.getPropertyLocation(i)
+        if (itemLocation.schema.$ref) {
+          itemLocation = resolveRef(context, itemLocation)
+          item = itemLocation.schema
+        }
+        const value = `value_${i}`
+        functionCode += `const ${value} = obj[${i}]`
+        const tmpRes = buildValue(context, itemLocation, value)
+        functionCode += `
+        if (${i} < arrayLength) {
+          if (${buildArrayTypeCondition(item.type, value)}) {
+            if (${i}) {
+              json += JSON_STR_COMMA
+            }
+            ${tmpRes}
+          } else {
+            throw new Error(\`Item at ${i} does not match schema definition.\`)
+          }
+        }
+        `
+      }
+
+      if (schema.additionalItems) {
+        functionCode += `
+        for (let i = ${itemsSchema.length}; i < arrayLength; i++) {
+          if (i) {
+            json += JSON_STR_COMMA
+          }
+          json += JSON.stringify(obj[i])
+        }`
+      }
+    } else {
+      const code = buildValue(context, itemsLocation, 'value')
+      functionCode += `
+      if (arrayLength > 0) {
+        const value = obj[0]
+        ${code}
+        for (let i = 1; i < arrayLength; i++) {
+          json += JSON_STR_COMMA
+          const value = obj[i]
+          ${code}
+        }
+      }`
+    }
+
+    functionCode += `
+      return json + JSON_STR_END_ARRAY
+    }`
+
+    context.functions.push(functionCode)
+    return `json += ${functionName}(${input})`
+  }
+
+  context.buildingSet.add(schema)
+  const safeSchemaRef = getSafeSchemaRef(context, location)
+  const objVar = `obj_${context.uid++}`
+  let inlinedCode = `
+    const ${objVar} = ${input}
+    if (${objVar} === null) {
+      json += ${nullable ? 'JSON_STR_NULL' : 'JSON_STR_EMPTY_ARRAY'}
+    } else if (!Array.isArray(${objVar})) {
+      throw new TypeError(${JSON.stringify(`The value of '${safeSchemaRef}' does not match schema definition.`)})
+    } else {
+      const arrayLength_${objVar} = ${objVar}.length
+  `
+
+  if (!schema.additionalItems && Array.isArray(itemsSchema)) {
+    inlinedCode += `
+      if (arrayLength_${objVar} > ${itemsSchema.length}) {
+        throw new Error(\`Item at ${itemsSchema.length} does not match schema definition.\`)
+      }
+    `
+  }
+
+  if (context.largeArrayMechanism === 'json-stringify') {
+    inlinedCode += `if (arrayLength_${objVar} >= ${context.largeArraySize}) json += JSON.stringify(${objVar})\n else {`
+  } else if (plainStringFastPath) {
+    inlinedCode += `
+      let fjsPlain_${objVar}
+      if (typeof arrayLength_${objVar} === 'number' && arrayLength_${objVar} >= ${STRING_ARRAY_FAST_PATH_MIN_LENGTH} && Number.isInteger(arrayLength_${objVar}) && arrayLength_${objVar} <= 0xffffffff) fjsPlain_${objVar} = asPlainStringArray(${objVar}, arrayLength_${objVar})
+      if (fjsPlain_${objVar} !== undefined) json += fjsPlain_${objVar}
+      else {
+    `
+  }
+
+  inlinedCode += `
+    json += JSON_STR_BEGIN_ARRAY
+  `
+
+  if (Array.isArray(itemsSchema)) {
+    const localUid = context.uid++
+    inlinedCode += `let addComma_${localUid} = false\n`
+    for (let i = 0, itemsSchemaLength = itemsSchema.length; i < itemsSchemaLength; i++) {
+      let item = itemsSchema[i]
+      let itemLocation = itemsLocation.getPropertyLocation(i)
+      if (itemLocation.schema.$ref) {
+        itemLocation = resolveRef(context, itemLocation)
+        item = itemLocation.schema
+      }
+      const value = `value_${i}_${context.uid++}`
+      inlinedCode += `const ${value} = ${objVar}[${i}]`
+      const tmpRes = buildValue(context, itemLocation, value)
+      inlinedCode += `
+        if (${i} < arrayLength_${objVar}) {
+          if (${buildArrayTypeCondition(item.type, value)}) {
+            !addComma_${localUid} && (addComma_${localUid} = true) || (json += JSON_STR_COMMA)
+            ${tmpRes}
+          } else {
+            throw new Error(\`Item at ${i} does not match schema definition.\`)
+          }
+        }
+        `
+    }
+
+    if (schema.additionalItems) {
+      inlinedCode += `
+        for (let i = ${itemsSchema.length}; i < arrayLength_${objVar}; i++) {
+          !addComma_${localUid} && (addComma_${localUid} = true) || (json += JSON_STR_COMMA)
+          json += JSON.stringify(${objVar}[i])
+        }`
+    }
+  } else {
+    const code = buildValue(context, itemsLocation, 'value')
+    inlinedCode += `
+      if (arrayLength_${objVar} > 0) {
+        const value = ${objVar}[0]
+        ${code}
+        for (let i = 1; i < arrayLength_${objVar}; i++) {
+          json += JSON_STR_COMMA
+          const value = ${objVar}[i]
+          ${code}
+        }
+      }`
+  }
+
+  inlinedCode += `
+    json += JSON_STR_END_ARRAY
+  `
+
+  if (context.largeArrayMechanism === 'json-stringify' || plainStringFastPath) {
+    inlinedCode += '}'
+  }
+
+  inlinedCode += '}'
+  context.buildingSet.delete(schema)
+  return inlinedCode
+}
+
+function buildArrayTypeCondition (type, accessor) {
+  let condition
+  switch (type) {
+    case 'null':
+      condition = `${accessor} === null`
+      break
+    case 'string':
+      condition = `typeof ${accessor} === 'string' ||
+      ${accessor} === null ||
+      ${accessor} instanceof Date ||
+      ${accessor} instanceof RegExp ||
+      (
+        typeof ${accessor} === "object" &&
+        typeof ${accessor}.toString === "function" &&
+        ${accessor}.toString !== Object.prototype.toString
+      )`
+      break
+    case 'integer':
+      condition = `Number.isInteger(${accessor})`
+      break
+    case 'number':
+      condition = `Number.isFinite(${accessor})`
+      break
+    case 'boolean':
+      condition = `typeof ${accessor} === 'boolean'`
+      break
+    case 'object':
+      condition = `${accessor} && typeof ${accessor} === 'object' && ${accessor}.constructor === Object`
+      break
+    case 'array':
+      condition = `Array.isArray(${accessor})`
+      break
+    default:
+      if (Array.isArray(type)) {
+        const conditions = type.map((subType) => {
+          return buildArrayTypeCondition(subType, accessor)
+        })
+        condition = `(${conditions.join(' || ')})`
+      }
+  }
+  return condition
+}
+
+function generateFuncName (context) {
+  return 'anonymous' + context.functionsCounter++
+}
+
+function buildMultiTypeSerializer (context, location, input) {
+  const schema = location.schema
+  const types = schema.type.sort(t1 => t1 === 'null' ? -1 : 1)
+
+  let code = ''
+
+  types.forEach((type, index) => {
+    location.schema = { ...location.schema, type }
+    const nestedResult = buildSingleTypeSerializer(context, location, input)
+
+    const statement = index === 0 ? 'if' : 'else if'
+    switch (type) {
+      case 'null':
+        code += `
+          ${statement} (${input} === null) {
+            ${nestedResult}
+          }
+          `
+        break
+      case 'string': {
+        code += `
+          ${statement}(
+            typeof ${input} === "string" ||
+            ${input} === null ||
+            ${input} instanceof Date ||
+            ${input} instanceof RegExp ||
+            (
+              typeof ${input} === "object" &&
+              typeof ${input}.toString === "function" &&
+              ${input}.toString !== Object.prototype.toString
+            )
+          ) {
+            ${nestedResult}
+          }
+        `
+        break
+      }
+      case 'array': {
+        code += `
+          ${statement}(Array.isArray(${input})) {
+            ${nestedResult}
+          }
+        `
+        break
+      }
+      case 'integer': {
+        code += `
+          ${statement}(Number.isInteger(${input}) || ${input} === null) {
+            ${nestedResult}
+          }
+        `
+        break
+      }
+      case 'object': {
+        // An array is `typeof === 'object'`, so it would otherwise be captured
+        // by this branch and serialized as an object (dropping its items). Exclude
+        // arrays here so a sibling `array` type in the same `type` list can match.
+        code += `
+          ${statement}((typeof ${input} === "object" && !Array.isArray(${input})) || ${input} === null) {
+            ${nestedResult}
+          }
+        `
+        break
+      }
+      default: {
+        code += `
+          ${statement}(typeof ${input} === "${type}" || ${input} === null) {
+            ${nestedResult}
+          }
+        `
+        break
+      }
+    }
+  })
+  code += `
+    else throw new TypeError(${JSON.stringify(`The value of '${getSafeSchemaRef(context, location)}' does not match schema definition.`)})
+  `
+
+  return code
+}
+
+function buildSingleTypeSerializer (context, location, input) {
+  const schema = location.schema
+
+  switch (schema.type) {
+    case 'null':
+      return 'json += JSON_STR_NULL'
+    case 'string': {
+      if (schema.format === 'date-time') {
+        return `json += asDateTime(${input})`
+      } else if (schema.format === 'date') {
+        return `json += asDate(${input})`
+      } else if (schema.format === 'time') {
+        return `json += asTime(${input})`
+      } else if (schema.format === 'unsafe') {
+        return `json += asUnsafeString(${input})`
+      } else {
+        return `
+        if (typeof ${input} !== 'string') {
+          if (${input} === null) {
+            json += JSON_STR_EMPTY_STRING
+          } else if (${input} instanceof Date) {
+            json += JSON_STR_QUOTE + ${input}.toISOString() + JSON_STR_QUOTE
+          } else if (${input} instanceof RegExp) {
+            json += asString(${input}.source)
+          } else {
+            json += asString(${input}.toString())
+          }
+        } else {
+          json += asString(${input})
+        }
+        `
+      }
+    }
+    case 'integer':
+      return `json += asInteger(${input})`
+    case 'number':
+      return `json += asNumber(${input})`
+    case 'boolean':
+      return `json += asBoolean(${input})`
+    case 'object': {
+      return buildObject(context, location, input)
+    }
+    case 'array': {
+      return buildArray(context, location, input)
+    }
+    case undefined:
+      return `json += JSON.stringify(${input})`
+    default:
+      throw new Error(`${schema.type} unsupported`)
+  }
+}
+
+function detectRecursiveSchemas (context, location) {
+  const pathStack = new Set()
+  function traverse (location, depth) {
+    const schema = location.schema
+    if (!schema || typeof schema !== 'object') return
+
+    if (depth > context.maxDepth) {
+      throw schemaDepthError(context.maxDepth)
+    }
+
+    const schemaId = location.schemaId
+    const jsonPointer = location.jsonPointer
+    const fullPath = `${schemaId}#${jsonPointer}`
+
+    if (pathStack.has(fullPath)) {
+      // Mark all nodes in the current path that are part of the cycle
+      let inCycle = false
+      for (const p of pathStack) {
+        if (p === fullPath) inCycle = true
+        if (inCycle) context.recursivePaths.add(p)
+      }
+      context.recursivePaths.add(fullPath)
+      return
+    }
+    pathStack.add(fullPath)
+
+    if (schema.$ref) {
+      try {
+        const res = resolveRef(context, location)
+        traverse(res, depth)
+      } catch (err) {
+        if (!err.message.startsWith('Cannot find reference')) throw err
+        // Validation will handle missing refs later
+      }
+    }
+
+    const nestedDepth = depth + 1
+
+    for (const keyword of singleSchemaKeywords) {
+      if (typeof schema[keyword] === 'object' && schema[keyword] !== null) {
+        traverse(location.getPropertyLocation(keyword), nestedDepth)
+      }
+    }
+
+    for (const keyword of arraySchemaKeywords) {
+      const schemas = schema[keyword]
+      if (Array.isArray(schemas)) {
+        const schemasLocation = location.getPropertyLocation(keyword)
+        const schemasLength = schemas.length
+        for (let i = 0; i < schemasLength; i++) {
+          traverse(schemasLocation.getPropertyLocation(i), nestedDepth)
+        }
+      }
+    }
+
+    const items = schema.items
+    if (Array.isArray(items)) {
+      const itemsLocation = location.getPropertyLocation('items')
+      const itemsLength = items.length
+      for (let i = 0; i < itemsLength; i++) {
+        traverse(itemsLocation.getPropertyLocation(i), nestedDepth)
+      }
+    } else if (typeof items === 'object' && items !== null) {
+      traverse(location.getPropertyLocation('items'), nestedDepth)
+    }
+
+    for (const keyword of objectSchemaKeywords) {
+      const schemas = schema[keyword]
+      if (typeof schemas === 'object' && schemas !== null) {
+        const schemasLocation = location.getPropertyLocation(keyword)
+        for (const key in schemas) {
+          traverse(schemasLocation.getPropertyLocation(key), nestedDepth)
+        }
+      }
+    }
+
+    const dependencies = schema.dependencies
+    if (typeof dependencies === 'object' && dependencies !== null) {
+      const dependenciesLocation = location.getPropertyLocation('dependencies')
+      for (const key in dependencies) {
+        if (!Array.isArray(dependencies[key])) {
+          traverse(dependenciesLocation.getPropertyLocation(key), nestedDepth)
+        }
+      }
+    }
+
+    pathStack.delete(fullPath)
+  }
+  traverse(location, 0)
+}
+
+function buildConstSerializer (location, input) {
+  const schema = location.schema
+  const type = schema.type
+
+  const hasNullType = Array.isArray(type) && type.includes('null')
+
+  let code = ''
+
+  if (hasNullType) {
+    code += `
+      if (${input} === null) {
+        json += JSON_STR_NULL
+      } else {
+    `
+  }
+
+  code += `json += ${JSON.stringify(JSON.stringify(schema.const))}`
+
+  if (hasNullType) {
+    code += `
+      }
+    `
+  }
+
+  return code
+}
+
+function buildAllOf (context, location, input) {
+  const schema = location.schema
+
+  let mergedSchemaId = context.mergedSchemasIds.get(schema)
+  if (mergedSchemaId) {
+    const mergedLocation = getMergedLocation(context, mergedSchemaId)
+    return buildValue(context, mergedLocation, input)
+  }
+
+  mergedSchemaId = `__fjs_merged_${schemaIdCounter++}`
+  context.mergedSchemasIds.set(schema, mergedSchemaId)
+
+  const { allOf, ...schemaWithoutAllOf } = location.schema
+  const dropAdditionalProperties = schemaWithoutAllOf.additionalProperties === false
+  if (dropAdditionalProperties) delete schemaWithoutAllOf.additionalProperties
+
+  const locations = [
+    new Location(
+      schemaWithoutAllOf,
+      location.schemaId,
+      location.jsonPointer
+    )
+  ]
+
+  const allOfsLocation = location.getPropertyLocation('allOf')
+  for (let i = 0, allOfLength = allOf.length; i < allOfLength; i++) {
+    locations.push(allOfsLocation.getPropertyLocation(i))
+  }
+
+  const mergedLocation = mergeLocations(context, mergedSchemaId, locations)
+  if (dropAdditionalProperties) mergedLocation.schema.additionalProperties = false
+  return buildValue(context, mergedLocation, input)
+}
+
+function buildOneOf (context, location, input) {
+  context.validatorSchemasIds.add(location.schemaId)
+
+  const schema = location.schema
+
+  const type = schema.anyOf ? 'anyOf' : 'oneOf'
+  const { [type]: oneOfs, ...schemaWithoutAnyOf } = location.schema
+
+  const locationWithoutOneOf = new Location(
+    schemaWithoutAnyOf,
+    location.schemaId,
+    location.jsonPointer
+  )
+  const oneOfsLocation = location.getPropertyLocation(type)
+
+  let code = ''
+
+  for (let index = 0, oneOfsLength = oneOfs.length; index < oneOfsLength; index++) {
+    const optionLocation = oneOfsLocation.getPropertyLocation(index)
+    const optionSchema = optionLocation.schema
+
+    let mergedSchemaId = context.mergedSchemasIds.get(optionSchema)
+    let mergedLocation = null
+    if (mergedSchemaId) {
+      mergedLocation = getMergedLocation(context, mergedSchemaId)
+    } else {
+      mergedSchemaId = `__fjs_merged_${schemaIdCounter++}`
+      context.mergedSchemasIds.set(optionSchema, mergedSchemaId)
+
+      mergedLocation = mergeLocations(context, mergedSchemaId, [
+        locationWithoutOneOf,
+        optionLocation
+      ])
+    }
+
+    const nestedResult = buildValue(context, mergedLocation, input)
+    const schemaRef = getValidatorSchemaRef(context, optionLocation)
+    context.validatorSchemaRefs.add(schemaRef)
+
+    code += `
+      ${index === 0 ? 'if' : 'else if'}(validator.validate(${JSON.stringify(schemaRef)}, ${input})) {
+        ${nestedResult}
+      }
+    `
+  }
+
+  code += `
+    else throw new TypeError(${JSON.stringify(`The value of '${getSafeSchemaRef(context, location)}' does not match schema definition.`)})
+  `
+
+  return code
+}
+
+function buildIfThenElse (context, location, input) {
+  context.validatorSchemasIds.add(location.schemaId)
+
+  const {
+    if: ifSchema,
+    then: thenSchema,
+    else: elseSchema,
+    ...schemaWithoutIfThenElse
+  } = location.schema
+
+  const rootLocation = new Location(
+    schemaWithoutIfThenElse,
+    location.schemaId,
+    location.jsonPointer
+  )
+
+  const ifLocation = location.getPropertyLocation('if')
+  const ifSchemaRef = getValidatorSchemaRef(context, ifLocation)
+  context.validatorSchemaRefs.add(ifSchemaRef)
+
+  // `then` is optional: a schema may pair `if` with `else` alone. In that case
+  // the true branch adds no keywords, so it serializes with the root schema.
+  let thenMergedLocation = rootLocation
+  if (thenSchema !== undefined) {
+    const thenLocation = location.getPropertyLocation('then')
+    let thenMergedSchemaId = context.mergedSchemasIds.get(thenSchema)
+    if (thenMergedSchemaId) {
+      thenMergedLocation = getMergedLocation(context, thenMergedSchemaId)
+    } else {
+      thenMergedSchemaId = `__fjs_merged_${schemaIdCounter++}`
+      context.mergedSchemasIds.set(thenSchema, thenMergedSchemaId)
+
+      thenMergedLocation = mergeLocations(context, thenMergedSchemaId, [
+        rootLocation,
+        thenLocation
+      ])
+    }
+  }
+
+  if (!elseSchema) {
+    return `
+      if (validator.validate(${JSON.stringify(ifSchemaRef)}, ${input})) {
+        ${buildValue(context, thenMergedLocation, input)}
+      } else {
+        ${buildValue(context, rootLocation, input)}
+      }
+    `
+  }
+
+  const elseLocation = location.getPropertyLocation('else')
+  let elseMergedSchemaId = context.mergedSchemasIds.get(elseSchema)
+  let elseMergedLocation = null
+  if (elseMergedSchemaId) {
+    elseMergedLocation = getMergedLocation(context, elseMergedSchemaId)
+  } else {
+    elseMergedSchemaId = `__fjs_merged_${schemaIdCounter++}`
+    context.mergedSchemasIds.set(elseSchema, elseMergedSchemaId)
+
+    elseMergedLocation = mergeLocations(context, elseMergedSchemaId, [
+      rootLocation,
+      elseLocation
+    ])
+  }
+
+  return `
+    if (validator.validate(${JSON.stringify(ifSchemaRef)}, ${input})) {
+      ${buildValue(context, thenMergedLocation, input)}
+    } else {
+      ${buildValue(context, elseMergedLocation, input)}
+    }
+  `
+}
+
+function buildValue (context, location, input) {
+  let schema = location.schema
+
+  if (typeof schema === 'boolean') {
+    return `json += JSON.stringify(${input})`
+  }
+
+  if (schema.$ref) {
+    location = resolveRef(context, location)
+    schema = location.schema
+  }
+
+  if (schema.allOf) {
+    return buildAllOf(context, location, input)
+  }
+
+  if (schema.anyOf || schema.oneOf) {
+    return buildOneOf(context, location, input)
+  }
+
+  if (schema.if && (schema.then || schema.else)) {
+    return buildIfThenElse(context, location, input)
+  }
+
+  if (schema.type === undefined) {
+    const inferredType = inferTypeByKeyword(schema)
+    if (inferredType) {
+      schema.type = inferredType
+    }
+  }
+
+  let code = ''
+
+  const type = schema.type
+  const nullable = schema.nullable === true
+  if (nullable) {
+    code += `
+      if (${input} === null) {
+        json += JSON_STR_NULL
+      } else {
+    `
+  }
+
+  if (schema.const !== undefined) {
+    code += buildConstSerializer(location, input)
+  } else if (Array.isArray(type)) {
+    code += buildMultiTypeSerializer(context, location, input)
+  } else {
+    code += buildSingleTypeSerializer(context, location, input)
+  }
+
+  if (nullable) {
+    code += `
+      }
+    `
+  }
+
+  return code
+}
+
+module.exports = build
+module.exports.default = build
+module.exports.build = build
+
+module.exports.validLargeArrayMechanisms = validLargeArrayMechanisms
+
+module.exports.restore = function ({ code, validator, serializer }) {
+  // eslint-disable-next-line
+  return (Function.apply(null, ['validator', 'serializer', code])
+    .apply(null, [validator, serializer]))
+}

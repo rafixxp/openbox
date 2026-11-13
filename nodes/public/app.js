@@ -43,6 +43,120 @@ function esc(s) {
   return String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 }
 
+/* ---------- file manager helpers (dipakai juga oleh fileBrowser) ---------- */
+const MAX_UPLOAD_BYTES = 100 * 1024 * 1024;
+const CLIPBOARD_KEY = 'np-clipboard-history';
+const CLIPBOARD_MAX = 20;
+
+function basenameOf(p) {
+  const parts = String(p || '').replace(/\/+$/, '').split('/');
+  return parts[parts.length - 1] || '/';
+}
+
+/** Gabungkan direktori relatif (selalu diawali '/') dengan nama item. */
+function relJoin(dir, name) {
+  const clean = String(dir || '/').replace(/\/+$/, '');
+  return (clean === '' ? '' : clean) + '/' + String(name || '').replace(/^\/+/, '');
+}
+
+function fmtWhen(value) {
+  if (!value) return '';
+  const ms = new Date(value).getTime();
+  if (Number.isNaN(ms)) return '';
+  const diff = Date.now() - ms;
+  if (diff < 60_000) return 'baru saja';
+  if (diff < 3_600_000) return `${Math.floor(diff / 60_000)} menit lalu`;
+  if (diff < 86_400_000) return `${Math.floor(diff / 3_600_000)} jam lalu`;
+  return new Date(value).toLocaleString('id-ID', { dateStyle: 'short', timeStyle: 'short' });
+}
+
+function readClipboardHistory() {
+  try {
+    const value = JSON.parse(localStorage.getItem(CLIPBOARD_KEY) || '[]');
+    return Array.isArray(value) ? value.filter((e) => e && e.rel && e.name) : [];
+  } catch {
+    return [];
+  }
+}
+
+function writeClipboardHistory(list) {
+  try {
+    localStorage.setItem(CLIPBOARD_KEY, JSON.stringify(list.slice(0, CLIPBOARD_MAX)));
+  } catch {
+    /* storage penuh / mode privat */
+  }
+}
+
+function normalizeRelPath(value, baseRoot = '') {
+  let raw = String(value || '').trim();
+  if (!raw) return '/';
+  raw = raw.replace(/\\/g, '/').replace(/\/+/g, '/');
+  const base = String(baseRoot || '').replace(/\/+$/, '');
+  if (base && (raw === base || raw.startsWith(base + '/'))) {
+    raw = raw.slice(base.length) || '/';
+  }
+  if (!raw || raw === '/') return '/';
+  if (raw.split('/').includes('..')) return null;
+  const body = raw.replace(/^\/+|\/+$/g, '');
+  return '/' + body + (body ? '/' : '');
+}
+
+/**
+ * Validasi nama file/folder. Mengembalikan pesan error atau string kosong.
+ */
+function validateEntryName(name, opts = {}) {
+  const value = String(name ?? '');
+  const items = Array.isArray(opts.items) ? opts.items : [];
+  const original = opts.original || '';
+  if (!value) return 'Nama wajib diisi';
+  if (value !== value.trim()) return 'Nama tidak boleh diawali atau diakhiri spasi';
+  if (value.length > 255) return 'Nama maksimal 255 karakter';
+  if (/[\/\\\0]/.test(value)) return 'Nama tidak boleh mengandung /, \\, atau karakter null';
+  if (value === '.' || value === '..') return 'Nama "." dan ".." tidak boleh dipakai';
+  if (value.endsWith('.')) return 'Nama tidak boleh berakhir dengan titik';
+  if (items.some((item) => item.name === value && item.name !== original)) {
+    return `"${value}" sudah ada di folder ini`;
+  }
+  return '';
+}
+
+/** Dialog konfirmasi async berbasis modal panel (bukan confirm() bawaan). */
+function confirmDialog({ title = 'Konfirmasi', message = '', detail = '', confirmText = 'Lanjutkan', danger = false } = {}) {
+  return new Promise((resolve) => {
+    const md = modal({
+      title: esc(title),
+      body: `<p style="margin:0 0 8px">${message}</p>${
+        detail ? `<p class="muted" style="font-size:12px;margin:0">${detail}</p>` : ''
+      }`,
+      footer: `<button class="btn" id="cf-cancel">Batal</button><button class="btn ${
+        danger ? 'btn-danger' : 'btn-primary'
+      }" id="cf-ok">${esc(confirmText)}</button>`,
+    });
+    let done = false;
+    const finish = (value) => {
+      if (done) return;
+      done = true;
+      document.removeEventListener('keydown', onKey, true);
+      closeModal();
+      resolve(value);
+    };
+    const onKey = (event) => {
+      if (event.key === 'Escape') finish(false);
+    };
+    document.addEventListener('keydown', onKey, true);
+    $('#cf-cancel', md).addEventListener('click', () => finish(false));
+    $('#cf-ok', md).addEventListener('click', () => finish(true));
+    const overlay = $('.modal-overlay', md);
+    if (overlay) {
+      overlay.addEventListener('click', (event) => {
+        if (event.target === overlay) finish(false);
+      });
+    }
+    const ok = $('#cf-ok', md);
+    if (ok) ok.focus();
+  });
+}
+
 function getInitials(value) {
   const words = String(value || '').trim().split(/\\s+/).filter(Boolean);
   if (!words.length) return '?';
@@ -329,12 +443,15 @@ const ICONS = {
  * Mengelola state di localStorage bila bukan mode compact.
  */
 function fileBrowser(container, opts = {}) {
-  const persist = !opts.compact;
+  // Pemanggil boleh memberi `persist` eksplisit; fallback ke perilaku lama.
+  const persist = opts.persist ?? !opts.compact;
   let root = opts.root ?? STATE.filesRoot;
   let pathStr = opts.path ?? (persist ? STATE.filesPath : '/');
-  let clipboard = null;
+  let clipboardHistory = readClipboardHistory().filter((entry) => entry.root === root);
+  let clipboard = clipboardHistory[0] || null;
   let selected = null;
   let currentItems = [];
+  let dragDepth = 0;
 
   container.innerHTML = `
     <div class="card-header" style="flex-wrap:wrap;gap:10px">
@@ -348,12 +465,18 @@ function fileBrowser(container, opts = {}) {
         <button class="btn btn-sm" data-act="newfile">+ File</button>
         <button class="btn btn-sm" data-act="newdir">+ Folder</button>
         <button class="btn btn-sm btn-primary" data-act="upload">Upload</button>
-        <button class="btn btn-sm" data-act="paste" disabled title="Tempel dari clipboard">Tempel</button>
+        <button class="btn btn-sm" data-act="cloud">Cloud</button>
+        ${ME && ME.isAdmin ? '<button class="btn btn-sm" data-act="logs" title="Log aktivitas file manager">Log</button>' : ''}
+        <span class="fb-paste-group">
+          <button class="btn btn-sm" data-act="paste" disabled title="Tempel dari clipboard">Tempel</button>
+          <button class="btn btn-sm" data-act="clipboard" title="Riwayat clipboard" disabled>Riwayat</button>
+        </span>
       </div>
     </div>
     <div class="card-header" style="gap:10px;flex-wrap:wrap">
       <div class="fb-crumbs crumbs"></div>
       <div style="margin-left:auto;display:flex;gap:6px;align-items:center">
+        <input class="input" id="fb-goto" placeholder="Lompat ke path..." style="width:150px" title="Ketik path relatif lalu Enter">
         <input class="input" id="fb-search" placeholder="Cari di folder ini..." style="width:180px">
       </div>
     </div>
@@ -363,26 +486,32 @@ function fileBrowser(container, opts = {}) {
         <button class="btn btn-sm" data-f="open" disabled title="Buka file / edit / preview">Buka</button>
         <button class="btn btn-sm" data-f="download" disabled>Download</button>
         <button class="btn btn-sm" data-f="rename" disabled>Rename</button>
+        <button class="btn btn-sm" data-f="move" disabled title="Pindahkan ke folder lain">Pindah</button>
         <button class="btn btn-sm" data-f="copy" disabled title="Salin item">Salin</button>
         <button class="btn btn-sm" data-f="cut" disabled title="Potong item">Potong</button>
         <button class="btn btn-sm" data-f="dup" disabled>Duplikat</button>
         <button class="btn btn-sm" data-f="perm" disabled>Izin</button>
+        <button class="btn btn-sm" data-f="cloud" disabled title="Unggah file ke cloud storage">Ke Cloud</button>
         <button class="btn btn-sm" data-f="compress" disabled>Arsipkan</button>
         <button class="btn btn-sm" data-f="extract" disabled>Ekstrak</button>
         <button class="btn btn-sm btn-danger" data-f="del" disabled>Hapus</button>
       </span>
     </div>
-    <div class="fb-table"><div class="empty"><span class="spinner"></span></div></div>`;
+    <div class="fb-dropzone">
+      <div class="fb-table"><div class="empty"><span class="spinner"></span></div></div>
+      <div class="fb-drop-hint"><strong>Lepaskan file di sini</strong><span>Upload ke folder yang sedang dibuka · maks 100MB/file</span></div>
+    </div>`;
 
   function setSelButtons(enabled) {
     $$('.fb-selection [data-f]', container).forEach((b) => {
       const f = b.dataset.f;
-      const need = { open: true, download: true, rename: true, copy: true, cut: true, dup: true, perm: true, compress: true, extract: true, del: true };
+      const need = { open: true, download: true, rename: true, move: true, copy: true, cut: true, dup: true, perm: true, cloud: true, compress: true, extract: true, del: true };
       let on = enabled;
       if (enabled && selected) {
         if (f === 'extract') on = isArchive(selected.name) && selected.type !== 'dir';
         if (f === 'open') on = selected.type !== 'dir' && (selected.isText || isImage(selected.name));
         if (f === 'download') on = selected.type !== 'dir';
+        if (f === 'cloud') on = selected.type !== 'dir';
       }
       b.disabled = !on || !need[f];
     });
@@ -398,8 +527,12 @@ function fileBrowser(container, opts = {}) {
     rootInput.value = root;
     rootInput.addEventListener('change', (e) => {
       root = e.target.value;
+      pathStr = '/';
       STATE.filesRoot = root;
+      STATE.filesPath = '/';
       localStorage.setItem('np-root', root);
+      localStorage.setItem('np-path', '/');
+      syncClipboardForRoot();
       load();
     });
   }
@@ -409,10 +542,49 @@ function fileBrowser(container, opts = {}) {
     if (b.dataset.act === 'newdir') b.addEventListener('click', () => promptCreate('dir'));
     if (b.dataset.act === 'upload') b.addEventListener('click', () => uploadFile());
     if (b.dataset.act === 'paste') b.addEventListener('click', () => paste());
+    if (b.dataset.act === 'clipboard') b.addEventListener('click', () => clipboardPrompt());
+    if (b.dataset.act === 'cloud') b.addEventListener('click', () => cloudPrompt());
+    if (b.dataset.act === 'logs') b.addEventListener('click', () => logsPrompt());
   });
 
   $$('.fb-selection [data-f]', container).forEach((b) => b.addEventListener('click', () => act(b.dataset.f)));
   $('#fb-search', container).addEventListener('input', () => renderRows());
+
+  const gotoInput = $('#fb-goto', container);
+  if (gotoInput) {
+    gotoInput.addEventListener('keydown', (event) => {
+      if (event.key !== 'Enter') return;
+      const next = normalizeRelPath(gotoInput.value, root);
+      if (!next) return toast('Path tidak boleh mengandung ".."', 'error');
+      pathStr = next;
+      gotoInput.value = '';
+      load();
+    });
+  }
+
+  wireDropzone();
+
+  function syncClipboardForRoot() {
+    clipboardHistory = readClipboardHistory().filter((entry) => entry.root === root);
+    clipboard = clipboardHistory[0] || null;
+  }
+
+  function rememberClipboard(entry) {
+    const saved = { ...entry, root, createdAt: new Date().toISOString() };
+    const rest = readClipboardHistory().filter(
+      (item) => !(item.root === saved.root && item.rel === saved.rel && item.mode === saved.mode)
+    );
+    writeClipboardHistory([saved, ...rest].slice(0, CLIPBOARD_MAX));
+    syncClipboardForRoot();
+  }
+
+  function forgetClipboard(entry) {
+    const rest = readClipboardHistory().filter(
+      (item) => !(item.root === entry.root && item.rel === entry.rel && item.mode === entry.mode)
+    );
+    writeClipboardHistory(rest);
+    syncClipboardForRoot();
+  }
 
   function isArchive(name) { return /\.(zip|tar|tar\.gz|tgz|tar\.bz2|tbz2|tar\.xz)$/i.test(name || ''); }
   function isImage(name) { return /\.(png|jpe?g|gif|webp|svg|ico|bmp)$/i.test(name || ''); }
@@ -431,22 +603,31 @@ function fileBrowser(container, opts = {}) {
       return;
     }
     if (persist) { STATE.filesPath = pathStr; localStorage.setItem('np-path', pathStr); }
+    if (data.root && data.root !== root) {
+      root = data.root;
+      syncClipboardForRoot();
+    }
+    if (rootInput) rootInput.value = data.root;
 
+    // Path ringkas: chip root + breadcrumb relatif. Path absolut hanya di tooltip.
+    const rootLabel = basenameOf(data.root) || data.root;
     const shown = data.path && data.path !== '/' ? data.path.replace(/^\/|\/$/g, '').split('/') : [];
     let acc = '';
-    const crumbHTML = ['<a href="#" data-nav="/">/</a>'];
+    const crumbHTML = [
+      `<a href="#" data-nav="/" class="fb-home" title="Root: ${esc(data.root)}">🏠 ${esc(rootLabel)}</a>`,
+    ];
     shown.forEach((part, i) => {
       acc += '/' + part;
       if (i === shown.length - 1) {
-        crumbHTML.push(`<span class="current mono">${esc(part)}</span>`);
+        crumbHTML.push(`<span class="current mono" title="${esc(data.absolute || data.path)}">${esc(part)}</span>`);
       } else {
         crumbHTML.push(`<a href="#" data-nav="${esc(acc)}/">${esc(part)}</a>`);
       }
     });
 
     $('.fb-crumbs', container).innerHTML = `
-      <span class="muted mono" style="margin-right:4px">${esc(data.root)}</span>
-      ${crumbHTML.map((c, i) => `<span class="sep">${i ? '/' : ''}</span>${c}`).join('')}`;
+      ${crumbHTML.map((c, i) => `<span class="sep">${i ? '/' : ''}</span>${c}`).join('')}
+      <button type="button" class="btn btn-sm fb-copy-path" data-copy-path="${esc(data.absolute || data.root)}" title="Salin path lengkap">Salin path</button>`;
 
     $$('a[data-nav]', container).forEach((a) => a.addEventListener('click', (e) => {
       e.preventDefault();
@@ -454,8 +635,17 @@ function fileBrowser(container, opts = {}) {
       load();
     }));
 
+    $$('button[data-copy-path]', container).forEach((button) => button.addEventListener('click', async () => {
+      const value = button.dataset.copyPath || '';
+      try {
+        await navigator.clipboard.writeText(value);
+        toast('Path lengkap disalin');
+      } catch {
+        toast(value, '');
+      }
+    }));
+
     currentItems = data.items;
-    if (rootInput) rootInput.value = data.root;
 
     renderRows();
   }
@@ -472,10 +662,22 @@ function fileBrowser(container, opts = {}) {
     return '/' + (parts.length ? parts.join('/') + '/' : '');
   }
 
+  function updatePasteButton() {
+    const pasteButton = $('[data-act="paste"]', container);
+    if (!pasteButton) return;
+    pasteButton.disabled = !clipboard;
+    pasteButton.title = clipboard
+      ? `Tempel ${clipboard.mode === 'copy' ? 'salinan' : 'pindahan'} "${clipboard.name}"`
+      : 'Clipboard kosong';
+    const historyButton = $('[data-act="clipboard"]', container);
+    if (historyButton) {
+      historyButton.textContent = clipboardHistory.length ? `Riwayat (${clipboardHistory.length})` : 'Riwayat';
+      historyButton.disabled = clipboardHistory.length === 0;
+    }
+  }
+
   function renderRows() {
-    const clipboardPaste = $('[data-act="paste"]', container);
-    clipboardPaste.disabled = !clipboard;
-    if (clipboard) clipboardPaste.title = `Tempel: ${clipboard.mode} "${clipboard.rel}"`;
+    updatePasteButton();
     setSelButtons(false);
 
     const tbody = $('.fb-table', container);
@@ -493,6 +695,7 @@ function fileBrowser(container, opts = {}) {
     if (items.length === 0) {
       tbody.innerHTML = `<table><tbody>` + upRow + `<tr class="empty-row"><td colspan="5"><div class="empty">${currentItems.length ? 'Tidak ada item yang cocok' : 'Folder kosong'}</div></td></tr></tbody></table>`;
       wireUpRow();
+      updatePasteButton();
       return;
     }
 
@@ -503,7 +706,9 @@ function fileBrowser(container, opts = {}) {
           const size = isDir ? duCell(item.name) : fmtBytes(item.size);
           const rel = (pathStr === '/' ? '' : pathStr) + item.name;
           const selectedCls = selected && selected.name === item.name ? ' class="row-selected"' : '';
-          return `<tr${selectedCls} data-idx="${idx}">
+          return `<tr${selectedCls} data-idx="${idx}" data-item-rel="${esc(rel)}" data-item-name="${esc(item.name)}" data-item-type="${esc(item.type)}" draggable="true"${
+            isDir ? ` data-drop-rel="${esc(rel)}"` : ''
+          }>
             <td class="td-name">${ICONS[item.type] || ICONS.file} ${isDir
               ? `<a href="#" data-open="${esc(item.name)}" style="color:inherit;text-decoration:none;font-weight:500">${esc(item.name)}</a>`
               : `${isImage(item.name) ? `<a href="#" data-preview="${esc(item.name)}" title="Preview" style="color:inherit">${esc(item.name)}</a>` : `<span ${item.isText ? '' : 'style="color:var(--muted)"'}>${esc(item.name)}</span>`}`}</td>
@@ -513,7 +718,7 @@ function fileBrowser(container, opts = {}) {
             <td class="actions-cell td-actions">
               ${!isDir && item.isText ? `<button class="btn btn-sm" data-act2="open" data-n="${esc(item.name)}" data-rel="${esc(rel)}">Buka</button>` : ''}
               <button class="btn btn-sm" data-act2="rename" data-n="${esc(item.name)}" data-rel="${esc(rel)}">Rename</button>
-              <button class="btn btn-sm btn-danger" data-act2="del" data-n="${esc(item.name)}" data-rel="${esc(rel)}">Hapus</button>
+              <button class="btn btn-sm btn-danger" data-act2="del" data-n="${esc(item.name)}" data-rel="${esc(rel)}" data-type="${esc(item.type)}">Hapus</button>
             </td>
           </tr>`;
         }).join('') + `</tbody></table>`;
@@ -543,7 +748,17 @@ function fileBrowser(container, opts = {}) {
         } else if (act === 'rename') {
           await renamePrompt(name, rel);
         } else if (act === 'del') {
-          if (!confirm(`Hapus "${name}"? Tindakan ini permanen.`)) return;
+          const isDir = btn.dataset.type === 'dir';
+          const ok = await confirmDialog({
+            title: isDir ? 'Hapus folder' : 'Hapus file',
+            message: `Hapus <span class="mono">${esc(name)}</span>?`,
+            detail: isDir
+              ? 'Folder beserta seluruh isinya akan dihapus permanen dan tidak bisa dikembalikan.'
+              : 'File akan dihapus permanen dan tidak bisa dikembalikan.',
+            confirmText: 'Hapus',
+            danger: true,
+          });
+          if (!ok) return;
           await api('/api/files/delete', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ root, path: rel }) });
           toast(`"${name}" dihapus`);
         }
@@ -573,6 +788,77 @@ function fileBrowser(container, opts = {}) {
       tr.classList.add('row-selected');
       setSelButtons(true);
     }));
+
+    // Double-click: buka folder atau edit file teks.
+    $$('tr[data-idx]', tbody).forEach((tr) => tr.addEventListener('dblclick', async (e) => {
+      if (e.target.closest('a') || e.target.closest('button')) return;
+      const item = filteredItems()[parseInt(tr.dataset.idx, 10)];
+      if (!item) return;
+      const rel = tr.dataset.itemRel;
+      if (item.type === 'dir') {
+        pathStr = rel.endsWith('/') ? rel : rel + '/';
+        load();
+      } else if (item.isText) {
+        await openEditor(item.name, rel);
+      } else if (isImage(item.name)) {
+        await previewImage(item.name, rel);
+      }
+    }));
+
+    // Drag internal: pindahkan file/folder ke folder lain di tabel.
+    $$('tr[data-idx]', tbody).forEach((tr) => {
+      tr.addEventListener('dragstart', (e) => {
+        if (e.target.closest('a') || e.target.closest('button')) {
+          e.preventDefault();
+          return;
+        }
+        e.dataTransfer.effectAllowed = 'move';
+        e.dataTransfer.setData('application/x-nodepanel-item', JSON.stringify({
+          rel: tr.dataset.itemRel,
+          name: tr.dataset.itemName,
+          type: tr.dataset.itemType,
+        }));
+        e.dataTransfer.setData('text/plain', tr.dataset.itemName);
+        tr.classList.add('row-dragging');
+      });
+      tr.addEventListener('dragend', () => tr.classList.remove('row-dragging'));
+      if (tr.dataset.dropRel) {
+        tr.addEventListener('dragover', (e) => {
+          if (!Array.from(e.dataTransfer.types || []).includes('application/x-nodepanel-item')) return;
+          e.preventDefault();
+          e.dataTransfer.dropEffect = 'move';
+          tr.classList.add('row-drop-target');
+        });
+        tr.addEventListener('dragleave', () => tr.classList.remove('row-drop-target'));
+        tr.addEventListener('drop', async (e) => {
+          const raw = e.dataTransfer.getData('application/x-nodepanel-item');
+          if (!raw) return;
+          e.preventDefault();
+          e.stopPropagation();
+          tr.classList.remove('row-drop-target');
+          let item;
+          try { item = JSON.parse(raw); } catch { return; }
+          if (!item || !item.rel || item.rel === tr.dataset.dropRel) return;
+          const sourceRel = item.rel.startsWith('/') ? item.rel : '/' + item.rel;
+          const targetRel = tr.dataset.dropRel.startsWith('/') ? tr.dataset.dropRel : '/' + tr.dataset.dropRel;
+          if (targetRel.startsWith(sourceRel.replace(/\/$/, '') + '/')) {
+            return toast('Folder tidak bisa dipindah ke dalam dirinya sendiri', 'error');
+          }
+          try {
+            const dest = relJoin(tr.dataset.dropRel, item.name);
+            await api('/api/files/move', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ root, from: item.rel, to: dest }),
+            });
+            toast(`"${item.name}" dipindah ke ${tr.dataset.dropRel}`);
+            load();
+          } catch (err) {
+            toast(err.message, 'error');
+          }
+        });
+      }
+    });
   }
 
   function wireUpRow() {
@@ -583,6 +869,51 @@ function fileBrowser(container, opts = {}) {
       pathStr = pathUp();
       load();
     }));
+  }
+
+  function wireDropzone() {
+    const zone = $('.fb-dropzone', container);
+    if (!zone) return;
+    const hasFiles = (event) =>
+      !!(event.dataTransfer && Array.from(event.dataTransfer.types || []).includes('Files'));
+
+    zone.addEventListener('dragenter', (event) => {
+      if (!hasFiles(event)) return;
+      event.preventDefault();
+      dragDepth += 1;
+      zone.classList.add('fb-drop-active');
+    });
+
+    zone.addEventListener('dragover', (event) => {
+      if (!hasFiles(event)) return;
+      event.preventDefault();
+      event.dataTransfer.dropEffect = 'copy';
+      const row = event.target.closest('tr[data-drop-rel]');
+      $$('.fb-table tr', container).forEach((r) => {
+        r.classList.toggle('row-drop-target', r === row);
+      });
+    });
+
+    zone.addEventListener('dragleave', (event) => {
+      if (!hasFiles(event)) return;
+      dragDepth = Math.max(0, dragDepth - 1);
+      if (dragDepth > 0) return;
+      zone.classList.remove('fb-drop-active');
+      $$('.fb-table tr', container).forEach((r) => r.classList.remove('row-drop-target'));
+    });
+
+    zone.addEventListener('drop', async (event) => {
+      if (!hasFiles(event)) return; // drag internal ditangani baris folder
+      event.preventDefault();
+      dragDepth = 0;
+      zone.classList.remove('fb-drop-active');
+      $$('.fb-table tr', container).forEach((r) => r.classList.remove('row-drop-target'));
+      const row = event.target.closest('tr[data-drop-rel]');
+      const targetPath = row ? row.dataset.dropRel.replace(/\/+$/, '') + '/' : pathStr;
+      const files = Array.from(event.dataTransfer.files || []);
+      if (!files.length) return toast('Tidak ada file yang dijatuhkan', 'error');
+      await uploadFiles(files, targetPath);
+    });
   }
 
   function duCell(name) {
@@ -616,10 +947,12 @@ function fileBrowser(container, opts = {}) {
       if (f === 'open') {
         await openItem(name, rel);
       } else if (f === 'copy') {
-        clipboard = { mode: 'copy', rel, name };
+        rememberClipboard({ mode: 'copy', rel, name });
+        updatePasteButton();
         toast(`Disalin: "${name}" — pilih folder lain, lalu klik Tempel`);
       } else if (f === 'cut') {
-        clipboard = { mode: 'cut', rel, name };
+        rememberClipboard({ mode: 'cut', rel, name });
+        updatePasteButton();
         toast(`Dipotong: "${name}" — pilih tujuan, lalu klik Tempel`);
       } else if (f === 'dup') {
         const r = await api('/api/files/copy', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ root, from: rel, to: rel }) });
@@ -635,27 +968,109 @@ function fileBrowser(container, opts = {}) {
         await permPrompt(name, rel);
       } else if (f === 'rename') {
         await renamePrompt(name, rel);
+      } else if (f === 'move') {
+        await movePrompt(name, rel);
+      } else if (f === 'cloud') {
+        await cloudUploadPrompt(name, rel);
       } else if (f === 'del') {
-        if (!confirm(`Hapus "${name}"? Tindakan ini permanen.`)) return;
+        const isDir = selected.type === 'dir';
+        const ok = await confirmDialog({
+          title: isDir ? 'Hapus folder' : 'Hapus file',
+          message: `Hapus <span class="mono">${esc(name)}</span>?`,
+          detail: isDir
+            ? 'Folder beserta seluruh isinya akan dihapus permanen dan tidak bisa dikembalikan.'
+            : 'File akan dihapus permanen dan tidak bisa dikembalikan.',
+          confirmText: 'Hapus',
+          danger: true,
+        });
+        if (!ok) return;
         await api('/api/files/delete', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ root, path: rel }) });
         toast(`"${name}" dihapus`);
-      } else if (f === 'paste') {
-        // noop handled sebelumnya
       }
       load();
     } catch (e) { toast(e.message, 'error'); }
   }
 
-  async function paste() {
-    if (!clipboard) return toast('Clipboard kosong', 'error');
+  async function paste(entry = clipboard) {
+    if (!entry) return toast('Clipboard kosong', 'error');
+    if (entry.root && entry.root !== root) {
+      return toast('Item clipboard berasal dari root lain. Buka root tersebut untuk menempel.', 'error');
+    }
     try {
-      const dest = (pathStr === '/' ? '' : pathStr) + clipboard.name.split('/').pop();
-      const endpoint = clipboard.mode === 'copy' ? '/api/files/copy' : '/api/files/move';
-      const r = await api(endpoint, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ root, from: clipboard.rel, to: dest }) });
-      toast(`${clipboard.mode === 'copy' ? 'Disalin' : 'Dipindah'} ke "${r.to}"`);
-      clipboard = null;
+      const dest = relJoin(pathStr, entry.name.split('/').pop());
+      const endpoint = entry.mode === 'copy' ? '/api/files/copy' : '/api/files/move';
+      const r = await api(endpoint, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ root, from: entry.rel, to: dest }) });
+      toast(`${entry.mode === 'copy' ? 'Disalin' : 'Dipindah'} ke "${r.to}"`);
+      if (entry.mode === 'cut') forgetClipboard(entry);
+      updatePasteButton();
       load();
     } catch (e) { toast(e.message, 'error'); }
+  }
+
+  function clipboardPrompt() {
+    syncClipboardForRoot();
+    if (!clipboardHistory.length) return toast('Riwayat clipboard kosong', 'error');
+
+    const md = modal({
+      title: 'Riwayat Clipboard',
+      wide: true,
+      body: `<div id="clip-list"></div>`,
+      footer: `
+        <button class="btn btn-sm btn-danger" id="clip-clear">Bersihkan riwayat</button>
+        <button class="btn" onclick="closeModal()">Tutup</button>`,
+    });
+
+    function sourceDir(entry) {
+      const normalized = String(entry.rel || '').replace(/^\/+|\/+$/g, '');
+      const parts = normalized.split('/');
+      parts.pop();
+      return '/' + (parts.filter(Boolean).join('/') + (parts.length ? '/' : ''));
+    }
+
+    function draw() {
+      const list = $('#clip-list', md);
+      if (!list) return;
+      if (!clipboardHistory.length) {
+        list.innerHTML = '<div class="empty">Riwayat clipboard kosong</div>';
+        return;
+      }
+      list.innerHTML = clipboardHistory.map((entry, index) => `
+        <div class="clip-item">
+          <span class="clip-mode ${entry.mode === 'cut' ? 'cut' : ''}">${entry.mode === 'cut' ? 'Pindah' : 'Salin'}</span>
+          <div class="clip-meta">
+            <div class="clip-name mono">${esc(entry.name)}</div>
+            <div class="muted">dari <span class="mono">${esc(sourceDir(entry))}</span> · ${esc(fmtWhen(entry.createdAt))}</div>
+          </div>
+          <div class="clip-actions">
+            <button class="btn btn-sm" data-clip-paste="${index}">Tempel</button>
+            <button class="btn btn-sm btn-danger" data-clip-del="${index}" title="Hapus dari riwayat">Hapus</button>
+          </div>
+        </div>`).join('');
+      $$('[data-clip-paste]', md).forEach((button) => button.addEventListener('click', async () => {
+        const entry = clipboardHistory[Number(button.dataset.clipPaste)];
+        if (!entry) return;
+        closeModal();
+        await paste(entry);
+      }));
+      $$('[data-clip-del]', md).forEach((button) => button.addEventListener('click', () => {
+        const entry = clipboardHistory[Number(button.dataset.clipDel)];
+        if (!entry) return;
+        forgetClipboard(entry);
+        updatePasteButton();
+        draw();
+      }));
+    }
+
+    $('#clip-clear', md).addEventListener('click', () => {
+      const rest = readClipboardHistory().filter((entry) => entry.root !== root);
+      writeClipboardHistory(rest);
+      syncClipboardForRoot();
+      updatePasteButton();
+      draw();
+      toast('Riwayat clipboard dibersihkan');
+    });
+
+    draw();
   }
 
   async function compressPrompt(name, rel) {
@@ -681,16 +1096,35 @@ function fileBrowser(container, opts = {}) {
   }
 
   async function permPrompt(name, rel) {
+    const isDir = selected && selected.type === 'dir';
     const md = modal({
       title: `Izin Akses: ${esc(name)}`,
       body: `
-        <div class="field"><label>Modes (oktal, mis. 644/755)</label><input class="input mono" id="pm-mode" value="${esc(selected.permissions || '')}" maxLength="4"></div>
-        <div class="field"><label class="checkline"><input type="checkbox" id="pm-rec"> Terapkan berulang (recursive, untuk folder)</label></div>`,
+        <div class="field"><label>Mode oktal (contoh 644 / 755)</label>
+          <input class="input mono" id="pm-mode" value="${esc(selected.permissions || (isDir ? '755' : '644'))}" maxLength="4" inputmode="numeric">
+          <div class="fb-presets">
+            ${['644', '755', '700', '775', '600'].map((mode) => `<button type="button" class="btn btn-sm" data-mode="${mode}">${mode}</button>`).join('')}
+          </div>
+          <div class="field-error" id="pm-error"></div>
+        </div>
+        ${isDir ? '<div class="field"><label class="checkline"><input type="checkbox" id="pm-rec"> Terapkan berulang ke seluruh isi folder (recursive)</label></div>' : ''}`,
       footer: `<button class="btn" onclick="closeModal()">Batal</button><button class="btn btn-primary" id="pm-ok">Terapkan</button>`,
     });
+
+    $$('[data-mode]', md).forEach((button) => button.addEventListener('click', () => {
+      $('#pm-mode', md).value = button.dataset.mode;
+    }));
+
     $('#pm-ok', md).addEventListener('click', async () => {
+      const mode = $('#pm-mode', md).value.trim();
+      const error = $('#pm-error', md);
+      if (!/^[0-7]{3,4}$/.test(mode)) {
+        error.textContent = 'Mode harus 3–4 digit oktal, contoh 644 atau 755';
+        return;
+      }
+      error.textContent = '';
       try {
-        const r = await api('/api/files/chmod', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ root, path: rel, mode: $('#pm-mode').value, recursive: $('#pm-rec').checked }) });
+        const r = await api('/api/files/chmod', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ root, path: rel, mode, recursive: !!$('#pm-rec', md)?.checked }) });
         closeModal(); toast(`Izin diubah ke ${r.mode}`);
         load();
       } catch (e) { toast(e.message, 'error'); }
@@ -764,17 +1198,56 @@ function fileBrowser(container, opts = {}) {
   }
 
   async function renamePrompt(name, rel) {
+    const isDir = selected && selected.type === 'dir';
     const md = modal({
-      title: 'Rename',
-      body: `<div class="field"><label>Nama baru</label><input class="input" id="rn-name" value="${esc(name)}"></div>`,
+      title: 'Ganti Nama',
+      body: `<div class="field"><label>Nama baru</label>
+        <input class="input" id="rn-name" value="${esc(name)}" maxlength="255">
+        <div class="field-error" id="rn-error"></div>
+      </div>`,
       footer: `<button class="btn" onclick="closeModal()">Batal</button><button class="btn btn-primary" id="rn-ok">Rename</button>`,
     });
-    $('#rn-name', md).focus();
-    $('#rn-ok', md).addEventListener('click', async () => {
+
+    const input = $('#rn-name', md);
+    input.focus();
+    const dot = name.lastIndexOf('.');
+    if (!isDir && dot > 0) input.setSelectionRange(0, dot);
+    else input.select();
+
+    const submit = async () => {
+      const next = input.value;
+      const error = validateEntryName(next, { items: currentItems, original: name });
+      const errorEl = $('#rn-error', md);
+      if (error) {
+        errorEl.textContent = error;
+        input.focus();
+        return;
+      }
+      errorEl.textContent = '';
+      if (next === name) {
+        closeModal();
+        return;
+      }
       try {
-        await api('/api/files/rename', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ root, from: rel, to: posixDir(rel) + $('#rn-name').value }) });
-        closeModal(); load(); toast('Berhasil di-rename');
-      } catch (e) { toast(e.message, 'error'); }
+        await api('/api/files/rename', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ root, from: rel, to: posixDir(rel) + next }),
+        });
+        closeModal();
+        load();
+        toast('Berhasil di-rename');
+      } catch (e) {
+        errorEl.textContent = e.message;
+      }
+    };
+
+    $('#rn-ok', md).addEventListener('click', submit);
+    input.addEventListener('keydown', (event) => {
+      if (event.key === 'Enter') {
+        event.preventDefault();
+        submit();
+      }
     });
   }
 
@@ -783,35 +1256,466 @@ function fileBrowser(container, opts = {}) {
     return dir === '' ? '/' : dir + '/';
   }
 
+  function isTextExt(name) {
+    const base = basenameOf(name);
+    return (
+      !base.includes('.') ||
+      /\.(txt|md|markdown|json|js|mjs|cjs|ts|tsx|jsx|css|html?|php|py|sh|bash|ya?ml|xml|ini|conf|env|log|sql|toml|service|c|cpp|h|go|rb|rs)$/i.test(base)
+    );
+  }
+
   function promptCreate(type) {
+    const isFile = type === 'file';
+    const presets = [
+      ['.txt', 'Text (.txt)'],
+      ['.md', 'Markdown (.md)'],
+      ['.json', 'JSON (.json)'],
+      ['.js', 'JavaScript (.js)'],
+      ['.ts', 'TypeScript (.ts)'],
+      ['.css', 'CSS (.css)'],
+      ['.html', 'HTML (.html)'],
+      ['.php', 'PHP (.php)'],
+      ['.py', 'Python (.py)'],
+      ['.sh', 'Shell (.sh)'],
+      ['.yml', 'YAML (.yml)'],
+      ['.xml', 'XML (.xml)'],
+      ['.ini', 'INI (.ini)'],
+      ['.conf', 'Config (.conf)'],
+      ['.env', '.env'],
+      ['', 'Tanpa ekstensi / custom'],
+    ];
+
     const md = modal({
-      title: type === 'dir' ? 'Folder Baru' : 'File Baru',
-      body: `<div class="field"><label>Nama</label><input class="input" id="nc-name"></div>`,
+      title: isFile ? 'File Baru' : 'Folder Baru',
+      body: `
+        <div class="field"><label>Nama${isFile ? ' file' : ' folder'}</label>
+          <input class="input" id="nc-name" maxlength="255" placeholder="${isFile ? 'contoh: catatan' : 'contoh: arsip-2026'}">
+          <div class="field-error" id="nc-error"></div>
+        </div>
+        ${isFile ? `
+          <div class="field"><label>Format</label>
+            <select class="select" id="nc-format">${presets.map(([value, label]) => `<option value="${esc(value)}">${esc(label)}</option>`).join('')}</select>
+            <div class="field-hint muted">Ekstensi otomatis ditambahkan jika nama belum punya ekstensi.</div>
+          </div>
+          <div class="field"><label class="checkline"><input type="checkbox" id="nc-open" checked> Langsung buka editor setelah dibuat</label></div>
+        ` : ''}`,
       footer: `<button class="btn" onclick="closeModal()">Batal</button><button class="btn btn-primary" id="nc-ok">Buat</button>`,
     });
-    $('#nc-name', md).focus();
-    $('#nc-ok', md).addEventListener('click', async () => {
+
+    const input = $('#nc-name', md);
+    input.focus();
+
+    const submit = async () => {
+      let name = input.value;
+      const errorEl = $('#nc-error', md);
+      let error = validateEntryName(name, { items: currentItems });
+      if (error) {
+        errorEl.textContent = error;
+        input.focus();
+        return;
+      }
+
+      if (isFile) {
+        const format = $('#nc-format', md).value;
+        const hasExtension = basenameOf(name).lastIndexOf('.') > 0 || name.startsWith('.');
+        if (format && !hasExtension) name += format;
+        // ".env" cukup ditulis "env" atau ".env".
+        if (format === '.env' && name === 'env.env') name = '.env';
+        error = validateEntryName(name, { items: currentItems });
+        if (error) {
+          errorEl.textContent = error;
+          return;
+        }
+      }
+
+      errorEl.textContent = '';
+      const openAfter = isFile && !!$('#nc-open', md)?.checked;
       try {
-        await api('/api/files/create', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ root, path: (pathStr === '/' ? '' : pathStr) + $('#nc-name').value, type }) });
-        closeModal(); load(); toast('Berhasil dibuat');
-      } catch (e) { toast(e.message, 'error'); }
+        await api('/api/files/create', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ root, path: relJoin(pathStr, name), type }),
+        });
+        closeModal();
+        await load();
+        toast(`"${name}" berhasil dibuat`);
+        if (isFile && openAfter && isTextExt(name)) {
+          await openEditor(name, relJoin(pathStr, name));
+        }
+      } catch (e) {
+        errorEl.textContent = e.message;
+      }
+    };
+
+    $('#nc-ok', md).addEventListener('click', submit);
+    input.addEventListener('keydown', (event) => {
+      if (event.key === 'Enter') {
+        event.preventDefault();
+        submit();
+      }
+    });
+  }
+
+  async function movePrompt(name, rel) {
+    const md = modal({
+      title: `Pindahkan: ${esc(name)}`,
+      body: `<div class="field"><label>Folder tujuan (relatif terhadap root)</label>
+          <input class="input mono" id="mv-dest" value="${esc(pathStr)}" placeholder="/contoh/folder">
+          <div class="field-hint muted">Kosongkan untuk root. Nama file/folder tetap dipertahankan.</div>
+          <div class="field-error" id="mv-error"></div>
+        </div>`,
+      footer: `<button class="btn" onclick="closeModal()">Batal</button><button class="btn btn-primary" id="mv-ok">Pindahkan</button>`,
+    });
+
+    const input = $('#mv-dest', md);
+    input.focus();
+    input.select();
+
+    const submit = async () => {
+      const errorEl = $('#mv-error', md);
+      const destDir = normalizeRelPath(input.value, root);
+      if (destDir === null) {
+        errorEl.textContent = 'Path tujuan tidak boleh mengandung ".."';
+        return;
+      }
+      const dest = relJoin(destDir, name);
+      const relNorm = rel.startsWith('/') ? rel : '/' + rel;
+      if (dest === relNorm) {
+        errorEl.textContent = 'Item sudah berada di folder tersebut';
+        return;
+      }
+      if (selected && selected.type === 'dir' && dest.startsWith(relNorm.replace(/\/$/, '') + '/')) {
+        errorEl.textContent = 'Folder tidak bisa dipindah ke dalam dirinya sendiri';
+        return;
+      }
+      errorEl.textContent = '';
+      try {
+        await api('/api/files/move', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ root, from: rel, to: dest }),
+        });
+        closeModal();
+        load();
+        toast(`"${name}" dipindah ke ${destDir}`);
+      } catch (e) {
+        errorEl.textContent = e.message;
+      }
+    };
+
+    $('#mv-ok', md).addEventListener('click', submit);
+    input.addEventListener('keydown', (event) => {
+      if (event.key === 'Enter') {
+        event.preventDefault();
+        submit();
+      }
+    });
+  }
+
+  async function cloudPrompt() {
+    let data;
+    try {
+      data = await api('/api/cloud/providers');
+    } catch (e) {
+      return toast(e.message, 'error');
+    }
+
+    const md = modal({
+      title: 'Cloud Storage',
+      wide: true,
+      body: `<div id="cloud-providers"></div>`,
+      footer: `<button class="btn" onclick="closeModal()">Tutup</button>`,
+    });
+
+    async function refresh() {
+      try {
+        data = await api('/api/cloud/providers');
+        draw();
+      } catch (e) {
+        toast(e.message, 'error');
+      }
+    }
+
+    function draw() {
+      const box = $('#cloud-providers', md);
+      if (!box) return;
+      box.innerHTML = data.providers.map((provider) => {
+        const status = provider.connected
+          ? '<span class="badge badge-success">terhubung</span>'
+          : provider.configured
+            ? '<span class="badge">siap dihubungkan</span>'
+            : '<span class="badge badge-danger">belum dikonfigurasi</span>';
+        return `
+          <div class="provider-row">
+            <div class="provider-info">
+              <span class="provider-icon">${provider.id === 'google' ? 'G' : 'O'}</span>
+              <div>
+                <div class="provider-name">${esc(provider.label)} ${status}</div>
+                <div class="muted">${provider.connected ? 'File cloud dapat diimpor ke folder aktif.' : 'Hubungkan akun untuk menelusuri dan mengimpor file.'}</div>
+                ${provider.configured ? '' : `<div class="provider-env mono muted">Set ${provider.env.map(esc).join(' · ')} lalu restart panel.</div>`}
+              </div>
+            </div>
+            <div class="provider-actions">
+              ${provider.connected
+                ? `<button class="btn btn-sm btn-primary" data-cloud-browse="${esc(provider.id)}">Telusuri & Impor</button>
+                   <button class="btn btn-sm" data-cloud-disconnect="${esc(provider.id)}">Putuskan</button>`
+                : provider.configured
+                  ? `<button class="btn btn-sm btn-primary" data-cloud-connect="${esc(provider.id)}">Hubungkan</button>`
+                  : `<button class="btn btn-sm" disabled>Perlu konfigurasi</button>`}
+            </div>
+          </div>`;
+      }).join('');
+
+      $$('[data-cloud-connect]', md).forEach((button) => button.addEventListener('click', () => {
+        location.href = `/api/cloud/${encodeURIComponent(button.dataset.cloudConnect)}/connect`;
+      }));
+      $$('[data-cloud-browse]', md).forEach((button) => button.addEventListener('click', () => {
+        cloudBrowser(button.dataset.cloudBrowse);
+      }));
+      $$('[data-cloud-disconnect]', md).forEach((button) => button.addEventListener('click', async () => {
+        const provider = button.dataset.cloudDisconnect;
+        const ok = await confirmDialog({
+          title: 'Putuskan cloud',
+          message: `Putuskan koneksi <span class="mono">${esc(provider)}</span> dari akun ini?`,
+          confirmText: 'Putuskan',
+          danger: true,
+        });
+        if (!ok) return;
+        try {
+          await api(`/api/cloud/${encodeURIComponent(provider)}/disconnect`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: '{}',
+          });
+          toast('Koneksi cloud diputuskan');
+          await refresh();
+        } catch (e) {
+          toast(e.message, 'error');
+        }
+      }));
+    }
+
+    draw();
+  }
+
+  async function cloudBrowser(provider) {
+    const stack = [{ id: '', name: 'Root' }];
+    const md = modal({
+      title: `Cloud: ${esc(provider)}`,
+      wide: true,
+      body: `<div id="cloud-body"><div class="empty"><span class="spinner"></span></div></div>`,
+      footer: `<button class="btn" onclick="closeModal()">Tutup</button>`,
+    });
+
+    async function loadFolder() {
+      const body = $('#cloud-body', md);
+      if (!body) return;
+      const current = stack[stack.length - 1];
+      body.innerHTML = `<div class="empty"><span class="spinner"></span></div>`;
+      try {
+        const data = await api(
+          `/api/cloud/${encodeURIComponent(provider)}/items?folderId=${encodeURIComponent(current.id)}`
+        );
+        const crumbs = stack
+          .map((folder, index) =>
+            index === stack.length - 1
+              ? `<span class="current">${esc(folder.name)}</span>`
+              : `<a href="#" data-cloud-crumb="${index}">${esc(folder.name)}</a>`
+          )
+          .join('<span class="sep">/</span>');
+
+        body.innerHTML = `
+          <div class="cloud-breadcrumb">${crumbs}</div>
+          <div class="cloud-list">
+            ${data.items.length
+              ? data.items.map((item) => `
+                <div class="cloud-item">
+                  <span class="cloud-icon">${item.type === 'dir' ? '📁' : '📄'}</span>
+                  <div class="cloud-meta">
+                    <div class="cloud-name mono">${esc(item.name)}</div>
+                    <div class="muted">${item.type === 'dir' ? 'Folder' : fmtBytes(item.size)}${item.modified ? ` · ${esc(fmtWhen(item.modified))}` : ''}</div>
+                  </div>
+                  <div class="cloud-actions">
+                    ${item.type === 'dir'
+                      ? `<button class="btn btn-sm" data-cloud-open="${esc(item.id)}" data-cloud-name="${esc(item.name)}">Buka</button>`
+                      : `<button class="btn btn-sm btn-primary" data-cloud-import="${esc(item.id)}" data-cloud-name="${esc(item.name)}" data-cloud-mime="${esc(item.mime || '')}" data-cloud-size="${Number(item.size || 0)}">Impor</button>`}
+                  </div>
+                </div>`).join('')
+              : '<div class="empty">Folder kosong</div>'}
+          </div>`;
+
+        $$('[data-cloud-crumb]', md).forEach((link) => link.addEventListener('click', (event) => {
+          event.preventDefault();
+          stack.length = Number(link.dataset.cloudCrumb) + 1;
+          loadFolder();
+        }));
+        $$('[data-cloud-open]', md).forEach((button) => button.addEventListener('click', () => {
+          stack.push({ id: button.dataset.cloudOpen, name: button.dataset.cloudName });
+          loadFolder();
+        }));
+        $$('[data-cloud-import]', md).forEach((button) => button.addEventListener('click', async () => {
+          const name = button.dataset.cloudName;
+          button.disabled = true;
+          button.textContent = 'Mengimpor...';
+          try {
+            const result = await api(`/api/cloud/${encodeURIComponent(provider)}/import`, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                id: button.dataset.cloudImport,
+                name,
+                path: relJoin(pathStr, name),
+                root,
+                mime: button.dataset.cloudMime,
+              }),
+            });
+            toast(`"${result.name}" diimpor (${fmtBytes(result.size)})`);
+            load();
+          } catch (e) {
+            toast(e.message, 'error');
+          } finally {
+            button.disabled = false;
+            button.textContent = 'Impor';
+          }
+        }));
+      } catch (e) {
+        body.innerHTML = `<div class="empty">${esc(e.message)}</div>`;
+      }
+    }
+
+    loadFolder();
+  }
+
+  async function cloudUploadPrompt(name, rel) {
+    let data;
+    try {
+      data = await api('/api/cloud/providers');
+    } catch (e) {
+      return toast(e.message, 'error');
+    }
+    const connected = data.providers.filter((provider) => provider.connected);
+    if (!connected.length) {
+      toast('Belum ada cloud yang terhubung. Hubungkan dulu di tombol Cloud.', 'error');
+      return cloudPrompt();
+    }
+
+    const md = modal({
+      title: `Unggah ke Cloud: ${esc(name)}`,
+      body: `
+        <div class="field"><label>Provider</label>
+          <select class="select" id="cu-provider">${connected.map((provider) => `<option value="${esc(provider.id)}">${esc(provider.label)}</option>`).join('')}</select>
+        </div>
+        <div class="field"><label>Folder ID tujuan (opsional)</label>
+          <input class="input mono" id="cu-folder" placeholder="Kosongkan untuk root cloud">
+          <div class="field-hint muted">ID folder bisa dilihat dari URL folder di Google Drive/OneDrive.</div>
+          <div class="field-error" id="cu-error"></div>
+        </div>`,
+      footer: `<button class="btn" onclick="closeModal()">Batal</button><button class="btn btn-primary" id="cu-ok">Unggah</button>`,
+    });
+
+    $('#cu-ok', md).addEventListener('click', async () => {
+      const provider = $('#cu-provider', md).value;
+      const parentId = $('#cu-folder', md).value.trim();
+      const errorEl = $('#cu-error', md);
+      const button = $('#cu-ok', md);
+      button.disabled = true;
+      button.textContent = 'Mengunggah...';
+      try {
+        const result = await api(`/api/cloud/${encodeURIComponent(provider)}/export`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ root, path: rel, name, parentId }),
+        });
+        closeModal();
+        toast(`"${result.name}" diunggah ke cloud (${fmtBytes(result.size)})`);
+      } catch (e) {
+        errorEl.textContent = e.message;
+        button.disabled = false;
+        button.textContent = 'Unggah';
+      }
+    });
+  }
+
+  async function logsPrompt() {
+    let data;
+    try {
+      data = await api('/api/audit?limit=200&action=files');
+    } catch (e) {
+      return toast(e.message, 'error');
+    }
+
+    const rows = data.entries.length
+      ? data.entries.map((entry) => `
+        <tr>
+          <td class="mono muted" style="white-space:nowrap">${esc(fmtWhen(entry.ts))}</td>
+          <td class="mono">${esc(entry.user || '-')}</td>
+          <td><span class="badge ${entry.ok ? 'badge-success' : 'badge-danger'}">${entry.ok ? 'ok' : 'gagal'}</span></td>
+          <td class="mono">${esc(entry.action || '')}</td>
+          <td class="mono td-path" title="${esc(entry.target || '')}">${esc(entry.target || entry.path || '')}</td>
+          <td class="mono muted">${entry.durationMs != null ? `${entry.durationMs}ms` : ''}</td>
+        </tr>`).join('')
+      : '<tr><td colspan="6"><div class="empty">Belum ada log</div></td></tr>';
+
+    modal({
+      title: 'Log Aktivitas File Manager',
+      wide: true,
+      body: `
+        <div class="log-meta muted">Menampilkan ${data.entries.length} aksi terakhir · <span class="mono">${esc(data.logFile)}</span></div>
+        <div class="table-scroll">
+          <table>
+            <thead><tr><th>Waktu</th><th>User</th><th>Status</th><th>Aksi</th><th>Target</th><th>Durasi</th></tr></thead>
+            <tbody>${rows}</tbody>
+          </table>
+        </div>`,
+      footer: `<button class="btn" id="log-refresh">Muat ulang</button><button class="btn" onclick="closeModal()">Tutup</button>`,
+    });
+
+    $('#log-refresh').addEventListener('click', () => {
+      closeModal();
+      logsPrompt();
     });
   }
 
   function uploadFile() {
     const inp = document.createElement('input');
     inp.type = 'file';
-    inp.onchange = async () => {
-      const file = inp.files[0];
-      const fd = new FormData();
-      fd.append('file', file);
-      fd.append('path', (pathStr === '/' ? '' : pathStr) + file.name);
-      fd.append('root', root);
-      const res = await fetch('/api/files/upload', { method: 'POST', body: fd });
-      if (res.ok) { toast('Upload berhasil'); load(); }
-      else { const j = await res.json().catch(() => ({})); toast(j.error || 'Upload gagal', 'error'); }
-    };
+    inp.multiple = true;
+    inp.onchange = () => uploadFiles(Array.from(inp.files || []));
     inp.click();
+  }
+
+  async function uploadFiles(files, targetPath = pathStr) {
+    if (!files.length) return;
+    const oversized = files.filter((file) => file.size > MAX_UPLOAD_BYTES);
+    const valid = files.filter((file) => file.size <= MAX_UPLOAD_BYTES);
+
+    if (oversized.length) {
+      toast(
+        `${oversized.length} file dilewati: melebihi batas 100MB/file (${oversized
+          .slice(0, 3)
+          .map((file) => file.name)
+          .join(', ')}${oversized.length > 3 ? ', …' : ''})`,
+        'error'
+      );
+    }
+    if (!valid.length) return;
+
+    toast(`Mengunggah ${valid.length} file...`);
+    let ok = 0;
+    for (const file of valid) {
+      try {
+        const fd = new FormData();
+        fd.append('file', file);
+        fd.append('path', relJoin(targetPath, file.name));
+        fd.append('root', root);
+        await api('/api/files/upload', { method: 'POST', body: fd });
+        ok += 1;
+      } catch (e) {
+        toast(`Gagal upload "${file.name}": ${e.message}`, 'error');
+      }
+    }
+    if (ok) toast(`${ok} file berhasil diupload`);
+    load();
   }
 }
 
@@ -2219,6 +3123,11 @@ async function boot() {
     return; // api() sudah redirect ke /login saat 401
   }
   updateAccountUI();
+  const cloudParam = new URLSearchParams(location.search).get('cloud');
+  if (cloudParam) {
+    toast(`Cloud ${cloudParam} berhasil terhubung`);
+    history.replaceState(null, '', location.pathname + location.hash);
+  }
   window.addEventListener('hashchange', () => { navigate(); });
   window.addEventListener('keydown', (e) => { if (e.key === 'Escape') closeModal(); });
   navigate();

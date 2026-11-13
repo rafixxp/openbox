@@ -1,0 +1,68 @@
+{
+  "name": "@fastify/deepmerge",
+  "version": "3.2.4",
+  "description": "Merges the enumerable properties of two or more objects deeply.",
+  "main": "index.js",
+  "type": "commonjs",
+  "types": "types/index.d.ts",
+  "scripts": {
+    "lint": "eslint",
+    "lint:fix": "eslint --fix",
+    "test": "npm run test:unit && npm run test:typescript",
+    "test:typescript": "tstyche",
+    "test:unit": "c8 --all --include index.js --check-coverage --100 tape test/*.js"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/fastify/deepmerge.git"
+  },
+  "keywords": [
+    "merge",
+    "deep",
+    "recursive",
+    "object",
+    "immutable"
+  ],
+  "author": "Aras Abbasi <aras.abbasi@gmail.com>",
+  "contributors": [
+    {
+      "name": "Matteo Collina",
+      "email": "hello@matteocollina.com"
+    },
+    {
+      "name": "Manuel Spigolon",
+      "email": "behemoth89@gmail.com"
+    },
+    {
+      "name": "James Sumners",
+      "url": "https://james.sumners.info"
+    },
+    {
+      "name": "Frazer Smith",
+      "email": "frazer.dev@icloud.com",
+      "url": "https://github.com/fdawgs"
+    }
+  ],
+  "license": "MIT",
+  "bugs": {
+    "url": "https://github.com/fastify/deepmerge/issues"
+  },
+  "homepage": "https://github.com/fastify/deepmerge#readme",
+  "funding": [
+    {
+      "type": "github",
+      "url": "https://github.com/sponsors/fastify"
+    },
+    {
+      "type": "opencollective",
+      "url": "https://opencollective.com/fastify"
+    }
+  ],
+  "devDependencies": {
+    "c8": "^12.0.0",
+    "eslint": "^9.17.0",
+    "neostandard": "^0.13.0",
+    "tape": "^5.7.5",
+    "tstyche": "^7.0.0"
+  }
+}

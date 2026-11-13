@@ -5,14 +5,17 @@ const http = require('http');
 const { WebSocketServer } = require('ws');
 const { attachTerminal } = require('./src/terminal');
 const auth = require('./src/auth');
+const audit = require('./src/audit');
 
 const dashboardRoutes = require('./src/routes/dashboard');
 const filesRoutes = require('./src/routes/files');
+const filesExtra = require('./src/routes/files-extra');
 const servicesRoutes = require('./src/routes/services');
 const sitesRoutes = require('./src/routes/sites');
 const sslRoutes = require('./src/routes/ssl');
 const accountsRoutes = require('./src/routes/accounts');
 const databaseRoutes = require('./src/routes/database');
+const cloudRoutes = require('./src/routes/cloud');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -31,6 +34,14 @@ app.get('/login', (req, res) => {
   res.sendFile(path.join(__dirname, 'public', 'login.html'));
 });
 
+// Audit log dipasang sebelum router /api/files supaya kode file manager yang
+// sudah ada tidak perlu diubah. Middleware ini hanya mencatat lalu next().
+app.use('/api/files', audit.files);
+
+// Upload versi baru: batas keras 100MB/file. Route lama tetap menjadi fallback
+// untuk operasi lain dan untuk klien yang belum memakai endpoint ini.
+app.post('/api/files/upload', auth.requireAuth, filesExtra.uploadHandler);
+
 app.use('/api/dashboard', auth.requireAuth, dashboardRoutes);
 app.use('/api/files', auth.requireAuth, filesRoutes);
 app.use('/api/services', auth.requireAuth, servicesRoutes);
@@ -38,6 +49,12 @@ app.use('/api/sites', auth.requireAuth, sitesRoutes);
 app.use('/api/ssl', auth.requireAuth, sslRoutes);
 app.use('/api/accounts', auth.requireAuth, accountsRoutes);
 app.use('/api/database', auth.requireAuth, databaseRoutes);
+
+// Audit log hanya bisa dibaca administrator.
+app.use('/api/audit', auth.requireAuth, auth.requireAdmin, audit.routes);
+// Cloud storage: auth per-route karena callback OAuth tidak membawa cookie sesi.
+app.use('/api/cloud', audit.cloud);
+app.use('/api/cloud', cloudRoutes.router);
 
 app.get('/api/health', (req, res) => {
   res.json({ ok: true, hostname: os.hostname(), time: new Date().toISOString() });

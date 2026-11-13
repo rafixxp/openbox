@@ -1,4 +1,5 @@
 nodes/node_modules
+nodes/storage
 auto 
 binary
 *binary*
