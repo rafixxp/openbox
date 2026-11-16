@@ -3,6 +3,7 @@ const fs = require('fs');
 const path = require('path');
 const { execFile } = require('child_process');
 const auth = require('../auth');
+const policy = require('../policy');
 
 const exec = (cmd, args, options = {}) =>
   new Promise((resolve) => {
@@ -35,7 +36,9 @@ router.get('/certs', async (req, res) => {
   res.json({
     certs,
     certbotInstalled: certbotCheck.code === 0 && (certbotCheck.stdout || certbotCheck.stderr).toLowerCase().includes('certbot'),
-    certbotVersion: (certbotCheck.stdout + certbotCheck.stderr).trim()
+    certbotVersion: (certbotCheck.stdout + certbotCheck.stderr).trim(),
+    certbotLocked: policy.CERTBOT_LOCKED,
+    note: policy.CERTBOT_LOCKED ? policy.COORDINATION_MESSAGE : undefined
   });
 });
 
@@ -51,6 +54,9 @@ router.get('/info', async (req, res) => {
 });
 
 router.post('/renew', auth.requireAdmin, async (req, res) => {
+  if (policy.CERTBOT_LOCKED) {
+    return res.status(403).json({ error: policy.COORDINATION_MESSAGE, policy: 'certbot-locked' });
+  }
   const certName = String(req.body.certName || '').trim();
   if (!certName || !/^[a-zA-Z0-9._-]+$/.test(certName)) {
     return res.status(400).json({ error: 'certName tidak valid' });
@@ -63,6 +69,9 @@ router.post('/renew', auth.requireAdmin, async (req, res) => {
 });
 
 router.post('/issue', auth.requireAdmin, async (req, res) => {
+  if (policy.CERTBOT_LOCKED) {
+    return res.status(403).json({ error: policy.COORDINATION_MESSAGE, policy: 'certbot-locked' });
+  }
   const domain = String(req.body.domain || '').trim();
   const email = String(req.body.email || '').trim();
   // domain dipakai sebagai argumen CLI & nama folder certbot → wajib karakter aman

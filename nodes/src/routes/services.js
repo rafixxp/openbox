@@ -1,6 +1,7 @@
 const express = require('express');
 const { execFile } = require('child_process');
 const auth = require('../auth');
+const policy = require('../policy');
 
 const router = express.Router();
 
@@ -63,7 +64,8 @@ router.get('/', async (req, res) => {
           shortName: name,
           description: desc || `${active} (${sub})`,
           state,
-          type: 'systemd'
+          type: 'systemd',
+          protected: policy.isProtectedService(full)
         });
       }
     }
@@ -92,6 +94,7 @@ router.get('/', async (req, res) => {
         description: `${proc} (${running.length} proses)`,
         state: 'running',
         type: 'process',
+        protected: policy.isProtectedService(proc),
         pids: running.map((r) => r.pid),
         cpu: running.reduce((s, r) => s + parseFloat(r.cpu || 0), 0).toFixed(1),
         mem: running.reduce((s, r) => s + parseFloat(r.mem || 0), 0).toFixed(1)
@@ -108,6 +111,7 @@ router.get('/', async (req, res) => {
     services: list,
     manageable: isRoot(),
     iAmRoot: isRoot(),
+    policy: policy.policySummary(),
   });
 });
 
@@ -134,6 +138,17 @@ router.post('/action', auth.requireAdmin, async (req, res) => {
 
   // proses non-service (mis. pm2 tanpa unit systemd) tidak bisa dikontrol systemctl
   const unit = name.endsWith('.service') ? name : name + '.service';
+
+  // Kebijakan "Pengelolaan Services (Khusus)": Nginx & Certbot dikelola
+  // eksklusif dosen/pembicara — hanya status (read-only) yang diizinkan.
+  if (action !== 'status' && policy.isProtectedService(unit)) {
+    return res.status(403).json({
+      error: policy.COORDINATION_MESSAGE,
+      policy: 'protected-service',
+      service: policy.isProtectedService(unit) ? name.replace(/\.service$/, '') : name,
+    });
+  }
+
   const known = await directRun('systemctl', ['list-unit-files', unit, '--no-pager', '--no-legend']);
   const isSystemdUnit = (known.stdout || '').trim().length > 0;
 

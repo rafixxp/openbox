@@ -4,6 +4,7 @@ const fsp = fs.promises;
 const path = require('path');
 const { execFile } = require('child_process');
 const auth = require('../auth');
+const policy = require('../policy');
 
 const router = express.Router();
 
@@ -43,6 +44,22 @@ function isNginxConfAllowed(file) {
 
 function isWebDirSafe(dir) {
   return typeof dir === 'string' && path.resolve(dir).startsWith(WEB_ROOT + '/');
+}
+
+/**
+ * Kebijakan "Pengelolaan Services (Khusus)": mutasi vhost nginx (create/edit/
+ * toggle/delete) dan reload nginx terkunci — peserta wajib koordinasi ke dosen/
+ * pembicara. Buka dengan PANEL_ALLOW_NGINX_MUTATIONS=1 bila diperlukan.
+ * Mengembalikan true bila request sudah ditolak (res sudah dikirim).
+ */
+function guardNginxMutation(req, res) {
+  if (policy.NGINX_MUTATIONS_ALLOWED) return false;
+  res.status(403).json({
+    error: policy.COORDINATION_MESSAGE,
+    policy: 'nginx-mutations-locked',
+    hint: 'Set PANEL_ALLOW_NGINX_MUTATIONS=1 untuk membuka mutasi vhost (koordinasikan ke dosen/pembicara).',
+  });
+  return true;
 }
 
 /* ---------- baca (semua user login) ---------- */
@@ -101,7 +118,9 @@ router.get('/', async (req, res) => {
     nginxActive: nginxCheck.stdout.trim() === 'active',
     nginxSitesDir: sitesDir,
     sites: Object.values(sites),
-    webDirs
+    webDirs,
+    mutationsLocked: !policy.NGINX_MUTATIONS_ALLOWED,
+    policy: policy.policySummary()
   });
 });
 
@@ -146,6 +165,7 @@ router.post('/nginx-test', async (req, res) => {
 /* ---------- tulis (admin saja) ---------- */
 
 router.post('/toggle', auth.requireAdmin, async (req, res) => {
+  if (guardNginxMutation(req, res)) return;
   const { file, enable } = req.body;
   if (!file || !isNginxConfAllowed(file)) return res.status(400).json({ error: 'File harus di direktori sites nginx' });
   if (!fs.existsSync(NGINX_SITES_ENABLED)) return res.status(400).json({ error: 'site-enabled tidak ditemukan' });
@@ -167,6 +187,7 @@ router.post('/toggle', auth.requireAdmin, async (req, res) => {
 });
 
 router.post('/config', auth.requireAdmin, async (req, res) => {
+  if (guardNginxMutation(req, res)) return;
   try {
     const file = req.body.file;
     if (!file || !isNginxConfAllowed(file)) {
@@ -235,6 +256,7 @@ router.post('/git-clone', auth.requireAdmin, async (req, res) => {
 });
 
 router.post('/create', auth.requireAdmin, async (req, res) => {
+  if (guardNginxMutation(req, res)) return;
   const { name, serverName, gitUrl, branch, port, root } = req.body;
   if (!name || !/^[a-zA-Z0-9._-]+$/.test(name)) {
     return res.status(400).json({ error: 'Nama website tidak valid (a-z, 0-9, ., _, -)' });
@@ -317,6 +339,7 @@ router.post('/create', auth.requireAdmin, async (req, res) => {
 });
 
 router.post('/delete', auth.requireAdmin, async (req, res) => {
+  if (guardNginxMutation(req, res)) return;
   const { file, dir, deleteDir } = req.body;
   const results = {};
   if (file) {
