@@ -101,7 +101,7 @@ router.post('/', auth.requireAdmin, async (req, res) => {
     if (!NAME_RE.test(b.name || '')) return res.status(400).json({ error: 'Nama akun tidak valid (huruf/angka/_)' });
     if (readPasswd().some((u) => u.name === b.name)) return res.status(409).json({ error: 'Nama akun sudah dipakai' });
     if (!b.password || String(b.password).length < 8) return res.status(400).json({ error: 'Password wajib diisi (minimal 8 karakter)' });
-    if (/[:\\r\\n]/.test(String(b.password))) return res.status(400).json({ error: 'Password tidak boleh mengandung titik dua atau baris baru' });
+    if (/[:\r\n]/.test(String(b.password))) return res.status(400).json({ error: 'Password tidak boleh mengandung titik dua atau baris baru' });
 
     const shell = String(b.shell || '/bin/bash');
     const validShells = fs.existsSync('/etc/shells')
@@ -202,7 +202,7 @@ router.put('/:name', auth.requireAdmin, async (req, res) => {
     }
 
     if (b.password) {
-      if (String(b.password).length < 8 || /[:\\r\\n]/.test(String(b.password))) {
+      if (String(b.password).length < 8 || /[:\r\n]/.test(String(b.password))) {
         return res.status(400).json({ error: 'Password minimal 8 karakter dan tidak boleh mengandung titik dua / baris baru' });
       }
       const { spawn } = require('child_process');

@@ -1814,24 +1814,7 @@ async function renderAccount(el) {
         </div>
       </div>
     </div>
-    ${isAdmin ? `
-    <div class="card">
-      <div class="card-header">
-        <span class="card-title">Akun Linux</span>
-        <div style="display:flex;gap:8px">
-          <button class="btn btn-sm" id="acc-refresh">Refresh</button>
-          <button class="btn btn-sm btn-primary" id="acc-new">+ Buat Akun Baru</button>
-        </div>
-      </div>
-      <p class="card-note" style="font-size:12px">Daftar user Linux lokal (uid &ge; 1000). Perubahan dieksekusi via <span class="mono">useradd/usermod/userdel</span>; server panel membutuhkan hak root.</p>
-      <div class="card-body" style="padding:0" id="acc-table"><div class="empty"><span class="spinner"></span>&nbsp; Memuat akun...</div></div>
-    </div>` : `
-    <div class="card">
-      <div class="card-header"><span class="card-title">Kelola Akun Linux</span></div>
-      <div class="card-body">
-        <p class="muted" style="font-size:12px">Manajemen akun Linux (membuat/mengedit/menghapus user) hanya untuk administrator. Hubungi admin server jika butuh akun baru.</p>
-      </div>
-    </div>`}`;
+  `;
 
   try {
     const me = await api('/api/auth/me');
@@ -1958,33 +1941,7 @@ async function renderAccount(el) {
     }
   }
 
-  $('#acc-refresh').addEventListener('click', loadAccounts);
-  $('#acc-new').addEventListener('click', () => {
-    openModal({
-      title: 'Buat akun Linux baru',
-      wide: true,
-      body: `
-        <div class="field"><label>Username</label><input class="input" id="n-name" pattern="[a-z_][a-z0-9_-]*" placeholder="cth: budi"></div>
-        <div class="field"><label>Nama lengkap</label><input class="input" id="n-gecos" placeholder="opsional"></div>
-        <div class="field"><label>Shell</label><input class="input" id="n-shell" value="/bin/bash"></div>
-        <div class="field"><label>Grup tambahan</label><input class="input" id="n-groups" placeholder="opsional, koma antar grup"></div>
-        <div class="field"><label>Password (minimal 8 karakter)</label><input class="input" id="n-pass" type="password" autocomplete="new-password" minlength="8" required></div>
-        <div class="field"><label class="checkline"><input type="checkbox" id="n-sudo"> Memberi akses sudo</label></div>
-        <p class="muted" style="font-size:12px">Home directory dibuat otomatis (<span class="mono">useradd -m</span>).</p>`,
-      footer: `<button class="btn btn-sm" id="n-cancel">Batal</button><button class="btn btn-sm btn-primary" id="n-save">Buat</button>`,
-    });
-    $('#n-cancel').addEventListener('click', closeModal);
-    $('#n-save').addEventListener('click', async () => {
-      const name = $('#n-name').value.trim();
-      const payload = { name, gecos: $('#n-gecos').value, shell: $('#n-shell').value.trim(), groups: $('#n-groups').value, password: $('#n-pass').value, sudo: $('#n-sudo').checked };
-      if (!name) return toast('Nama akun wajib', 'error');
-      if (!/^[a-z_][a-z0-9_-]{0,31}$/i.test(name)) return toast('Format username Linux tidak valid', 'error');
-      if (payload.password.length < 8) return toast('Password minimal 8 karakter', 'error');
-      await doReq(() => api('/api/accounts', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) }), closeModal, loadAccounts);
-    });
-  });
 
-  loadAccounts();
 }
 
 async function doReq(fn, closeModalFn, refresh) {
@@ -2288,7 +2245,6 @@ async function renderSites(el) {
 
   const mutationsLocked = !!data.mutationsLocked;
   el.innerHTML = `
-    ${mutationsLocked ? `<div class="card"><div class="card-body" style="font-size:13px;color:var(--muted)">${esc(data.policy?.note || 'Mutasi vhost nginx terkunci — dikelola eksklusif oleh dosen/pembicara.')}</div></div>` : ''}
     <div class="grid grid-kpi">
       <div class="card"><div class="card-body"><div class="kpi-label"><span class="kpi-icon">${SI.globe}</span>Nginx</div>
         <div class="kpi-value" style="display:flex;align-items:center;gap:8px">
@@ -3261,11 +3217,11 @@ async function renderDbRecords(el, svc, db, table) {
 const ROUTES = {
   dashboard: { title: 'Dashboard', render: renderDashboard },
   files: { title: 'File Manager', render: renderFiles },
-  services: { title: 'Services', render: renderServices },
-  sites: { title: 'Websites', render: renderSites },
+  services: { title: 'Layanan', render: renderServices },
+  sites: { title: 'Daftar Situs', render: renderSites },
   database: { title: 'Database', render: renderDashboard }, /* di-handle custom di navigate() */
   terminal: { title: 'Web Terminal', render: renderTerminal },
-  account: { title: 'Account', render: renderAccount },
+  account: { title: 'Akun Saya', render: renderAccount },
   akun: { title: 'Manajemen Akun', render: renderPanelAccounts },
 };
 

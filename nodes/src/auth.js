@@ -352,7 +352,8 @@ function routes(app) {
 
 /* auth untuk upgrade WebSocket — return username atau null */
 function wsUser(req) {
-  return valid(sidFromReq(req));
+  const s = valid(sidFromReq(req));
+  return s ? s.username : null;
 }
 
 function checkRequest(req) {

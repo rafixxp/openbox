@@ -36,10 +36,7 @@ const CERTBOT_LOCKED = envBool('PANEL_LOCK_CERTBOT', true);
 // Mutasi vhost nginx (create/edit/toggle/delete + reload nginx) terkunci.
 const NGINX_MUTATIONS_ALLOWED = envBool('PANEL_ALLOW_NGINX_MUTATIONS', false);
 
-const COORDINATION_MESSAGE =
-  'Layanan Nginx & SSL Certbot dikelola secara eksklusif oleh dosen/pembicara. ' +
-  'Tindakan ini dinonaktifkan untuk peserta; silakan koordinasikan kebutuhan ' +
-  '(virtual host, direktori publikasi, sertifikat SSL) kepada dosen/pembicara.';
+const COORDINATION_MESSAGE = '';
 
 function baseName(name) {
   return String(name || '').replace(/\.service$/, '').toLowerCase();
