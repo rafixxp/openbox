@@ -14,6 +14,7 @@ const servicesRoutes = require('./src/routes/services');
 const sitesRoutes = require('./src/routes/sites');
 const sslRoutes = require('./src/routes/ssl');
 const accountsRoutes = require('./src/routes/accounts');
+const panelAccountsRoutes = require('./src/routes/panel-accounts');
 const databaseRoutes = require('./src/routes/database');
 const cloudRoutes = require('./src/routes/cloud');
 
@@ -42,13 +43,14 @@ app.use('/api/files', audit.files);
 // untuk operasi lain dan untuk klien yang belum memakai endpoint ini.
 app.post('/api/files/upload', auth.requireAuth, filesExtra.uploadHandler);
 
-app.use('/api/dashboard', auth.requireAuth, dashboardRoutes);
-app.use('/api/files', auth.requireAuth, filesRoutes);
-app.use('/api/services', auth.requireAuth, servicesRoutes);
-app.use('/api/sites', auth.requireAuth, sitesRoutes);
-app.use('/api/ssl', auth.requireAuth, sslRoutes);
+app.use('/api/dashboard', auth.requireAuth, auth.requirePermission('dashboard'), dashboardRoutes);
+app.use('/api/files', auth.requireAuth, auth.requirePermission('files'), filesRoutes);
+app.use('/api/services', auth.requireAuth, auth.requirePermission('services'), servicesRoutes);
+app.use('/api/sites', auth.requireAuth, auth.requirePermission('sites'), sitesRoutes);
+app.use('/api/ssl', auth.requireAuth, auth.requirePermission('cloud'), sslRoutes);
 app.use('/api/accounts', auth.requireAuth, accountsRoutes);
-app.use('/api/database', auth.requireAuth, databaseRoutes);
+app.use('/api/database', auth.requireAuth, auth.requirePermission('database'), databaseRoutes);
+app.use('/api/panel-accounts', auth.requireAuth, panelAccountsRoutes);
 
 // Audit log hanya bisa dibaca administrator.
 app.use('/api/audit', auth.requireAuth, auth.requireAdmin, audit.routes);

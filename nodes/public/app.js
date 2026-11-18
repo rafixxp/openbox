@@ -8,6 +8,38 @@ const STATE = {
 };
 
 let ME = null;
+let dashboardInterval = null;
+
+function startDashboardRefresh(el) {
+  if (dashboardInterval) clearInterval(dashboardInterval);
+  if (!ME || !ME.role) return;
+  dashboardInterval = setInterval(async () => {
+    try {
+      const d = await api('/api/dashboard');
+      if (!d) return;
+      const kpiElements = el.querySelectorAll('.kpi-value');
+      if (kpiElements.length >= 4) {
+        kpiElements[0].textContent = `${Math.round(d.cpu.loadPercent)}%`;
+        kpiElements[1].textContent = `${Math.round(d.memory.usePercent)}%`;
+        kpiElements[2].textContent = discRoot(d.disks);
+        kpiElements[3].textContent = fmtUptime(d.uptime);
+      }
+      const uptimeTextEl = el.querySelector('.uptime-text');
+      if (uptimeTextEl) uptimeTextEl.textContent = d.uptimeText || '';
+      const bootEl = el.querySelector('.boot-time');
+      if (bootEl) bootEl.textContent = d.bootTime || '';
+    } catch (e) {
+      // console.error('Dashboard refresh error:', e);
+    }
+  }, 10000);
+}
+
+function stopDashboardRefresh() {
+  if (dashboardInterval) {
+    clearInterval(dashboardInterval);
+    dashboardInterval = null;
+  }
+}
 
 async function api(url, options) {
   const res = await fetch(url, options);
@@ -197,6 +229,23 @@ async function renderDashboard(el) {
   try { d = await api('/api/dashboard'); }
   catch (e) { el.innerHTML = `<div class="card"><div class="empty">Gagal memuat: ${esc(e.message)}</div></div>`; return; }
 
+  const isAdmin = !!(ME && ME.role === 'admin');
+
+  // Auto-refresh dashboard setiap 10 detik (dihentikan saat pindah halaman)
+  dashboardInterval = setInterval(async () => {
+    try {
+      const d = await api('/api/dashboard');
+      if (!d) return;
+      const KEs = document.querySelectorAll('.kpi-value');
+      if (KE.length >= 4) {
+        KEs[0].textContent = `${Math.round(d.cpu.loadPercent)}%`;
+        KEs[1].textContent = `${Math.round(d.memory.usePercent)}%`;
+        KEs[2].textContent = discRoot(d.disks);
+        KEs[3].textContent = fmtUptime(d.uptime);
+      }
+    } catch(e) {}
+  }, 10000);
+
   function discRoot(disks) {
     const root = disks.find((x) => x.mount === '/') || disks[0];
     if (!root) return '-';
@@ -282,6 +331,7 @@ async function renderDashboard(el) {
       </div>
     </div>
 
+    ${isAdmin ? `
     <div class="card">
       <div class="card-header"><span class="card-title">${DI.network} Jaringan</span></div>
       <div class="card-body" style="padding:0">
@@ -302,8 +352,9 @@ async function renderDashboard(el) {
           </tbody>
         </table>
       </div>
-    </div>
+    </div>` : ''}
 
+    ${isAdmin ? `
     <div class="grid grid-2">
       <div class="card">
         <div class="card-header"><span class="card-title">${DI.process} Proses Teratas (CPU)</span><span class="muted mono">${d.processes.all} proses total</span></div>
@@ -337,7 +388,7 @@ async function renderDashboard(el) {
           </table>
         </div>
       </div>
-    </div>
+    </div>` : ''}
   `;
 }
 
@@ -1733,7 +1784,7 @@ async function renderAccount(el) {
   el.innerHTML = `
     <div class="grid grid-2">
       <div class="card profile-card">
-        <div class="card-header"><span class="card-title">Profil Saya</span>${isAdmin ? '<span class="badge badge-danger">admin</span>' : '<span class="badge">user</span>'}</div>
+        <div class="card-header"><span class="card-title">Akun Saya</span>${isAdmin ? '<span class="badge badge-danger">admin</span>' : '<span class="badge">user</span>'}</div>
         <div class="card-body">
           <div class="profile-identity">
             <span class="profile-avatar" id="profile-avatar">${esc(getInitials(meData?.fullName || meData?.username))}</span>
@@ -1946,6 +1997,167 @@ async function doReq(fn, closeModalFn, refresh) {
     toast(e.message, 'error');
   }
 }
+
+/* ============ PANEL ACCOUNTS (CRUD + role & permission) ============ */
+async function renderPanelAccounts(el) {
+  if (!ME || !ME.permissions || !ME.permissions.includes('account')) {
+    el.innerHTML = `<div class="card"><div class="empty">Anda tidak memiliki izin untuk mengelola akun panel.</div></div>`;
+    return;
+  }
+  el.innerHTML = `<div class="card"><div class="empty"><span class="spinner"></span>&nbsp; Memuat daftar akun...</div></div>`;
+  let data;
+  try { data = await api('/api/panel-accounts'); }
+  catch (e) { el.innerHTML = `<div class="card"><div class="empty">${esc(e.message)}</div></div>`; return; }
+
+  const perms = data.permissions || {};
+  const roles = data.roles || { admin: 'admin', user: 'user' };
+
+  function permCheckboxes(selected = []) {
+    return Object.entries(perms).map(([key, label]) =>
+      `<label class="checkline" style="display:inline-block;margin-right:14px"><input type="checkbox" value="${esc(key)}" ${selected.includes(key) ? 'checked' : ''}> ${esc(label)}</label>`
+    ).join('');
+  }
+
+  el.innerHTML = `
+    <div class="card-header" style="display:flex;justify-content:space-between;align-items:center;gap:8px">
+      <span class="card-title">Daftar Akun Panel</span>
+      <button class="btn btn-sm btn-primary" id="pa-new">+ Tambah Akun</button>
+    </div>
+    <div class="card-body" style="padding:0" id="pa-list">
+      <div class="empty"><span class="spinner"></span>&nbsp; Memuat...</div>
+    </div>`;
+
+  async function load() {
+    let d;
+    try { d = await api('/api/panel-accounts'); } catch (e) { $('#pa-list').innerHTML = `<div class="empty">${esc(e.message)}</div>`; return; }
+    const accounts = d.accounts || [];
+    const self = ME ? ME.username : '';
+    if (accounts.length === 0) {
+      $('#pa-list').innerHTML = `<div class="empty">Belum ada akun panel</div>`;
+      return;
+    }
+    $('#pa-list').innerHTML = `<div class="table-scroll"><table>
+      <thead><tr><th>Username</th><th>Nama Lengkap</th><th>Role</th><th>Permission</th><th>Status</th><th style="width:230px">Aksi</th></tr></thead>
+      <tbody>
+        ${accounts.map((a) => `<tr>
+          <td><span class="mono" style="font-weight:600">${esc(a.username)}</span>${a.username === self ? ' <span class="badge badge-success">Anda</span>' : ''}</td>
+          <td class="muted">${esc(a.fullName || '-')}</td>
+          <td><span class="badge ${a.role === 'admin' ? 'badge-danger' : ''}">${esc(a.role)}</span></td>
+          <td class="muted" style="font-size:12px">${(a.permissions || []).length ? (a.permissions || []).join(', ') : '—'}</td>
+          <td>${a.active ? '<span class="badge badge-success">aktif</span>' : '<span class="badge">nonaktif</span>'}</td>
+          <td class="actions-cell">
+            <button class="btn btn-sm" data-pa="edit" data-n="${esc(a.username)}">Edit</button>
+            ${a.username === self ? '' : `<button class="btn btn-sm btn-danger" data-pa="del" data-n="${esc(a.username)}">Hapus</button>`}
+          </td>
+        </tr>`).join('')}
+      </tbody></table></div>`;
+
+    $$('[data-pa]', $('#pa-list')).forEach((btn) => btn.addEventListener('click', () => paAct(btn)));
+  }
+
+  async function paAct(btn) {
+    const name = btn.dataset.n;
+    if (btn.dataset.pa === 'del') {
+      const ok = await confirmDialog({ title: 'Hapus akun', message: `Hapus akun panel <span class="mono">${esc(name)}</span>?`, confirmText: 'Hapus', danger: true });
+      if (!ok) return;
+      try {
+        await api(`/api/panel-accounts/${encodeURIComponent(name)}`, { method: 'DELETE' });
+        toast('Akun dihapus');
+        load();
+      } catch (e) { toast(e.message, 'error'); }
+      return;
+    }
+    if (btn.dataset.pa === 'edit') {
+      let d;
+      try { d = await api('/api/panel-accounts'); } catch (e) { return toast(e.message, 'error'); }
+      const a = (d.accounts || []).find((x) => x.name === name || x.username === name);
+      if (!a) return toast('Akun tidak ditemukan', 'error');
+      const md = modal({
+        title: `Edit akun · ${esc(a.username)}`,
+        wide: true,
+        body: `
+          <div class="field"><label>Username</label><input class="input" id="ea-user" value="${esc(a.username)}" disabled></div>
+          <div class="field"><label>Nama lengkap</label><input class="input" id="ea-fullname" value="${esc(a.fullName)}"></div>
+          <div class="field"><label>Role</label>
+            <select class="select" id="ea-role">${Object.entries(roles).map(([k, v]) => `<option value="${esc(k)}" ${a.role === k ? 'selected' : ''}>${esc(v)} (${esc(k)})</option>`).join('')}</select>
+          </div>
+          <div class="field"><label>Permission (fitur yang bisa diakses)</label>
+            <div id="ea-perms" style="display:flex;flex-wrap:wrap;gap:8px">${permCheckboxes(a.permissions || [])}</div>
+            <p class="muted" style="font-size:12px;margin-top:6px">Role <strong>admin</strong> otomatis mendapat semua permission.</p>
+          </div>
+          <div class="field"><label class="checkline"><input type="checkbox" id="ea-active" ${a.active !== false ? 'checked' : ''}> Akun aktif</label></div>
+          <div class="field"><label>Password baru (kosongkan agar tidak berubah)</label><input class="input" id="ea-pass" type="password" autocomplete="new-password"></div>`,
+        footer: `<button class="btn btn-sm" id="ea-cancel">Batal</button><button class="btn btn-sm btn-primary" id="ea-save">Simpan</button>`,
+      });
+      const eaPerms = md.querySelectorAll('#ea-perms input[type="checkbox"]');
+      $('#ea-role').addEventListener('change', () => {
+        const isAdminRole = $('#ea-role').value === 'admin';
+        eaPerms.forEach((cb) => { cb.disabled = isAdminRole; });
+      });
+      $('#ea-cancel').addEventListener('click', closeModal);
+      $('#ea-save').addEventListener('click', async () => {
+        const role = $('#ea-role').value;
+        const checked = [...md.querySelectorAll('#ea-perms input[type="checkbox"]:checked')].map((cb) => cb.value);
+        const payload = { role, fullName: $('#ea-fullname').value, active: $('#ea-active').checked, permissions: isAdminRole ? [] : checked };
+        if ($('#ea-pass').value) payload.password = $('#ea-pass').value;
+        try {
+          await api(`/api/panel-accounts/${encodeURIComponent(a.username)}`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
+          closeModal(); toast('Akun diperbarui'); load();
+        } catch (e) { toast(e.message, 'error'); }
+      });
+      return;
+    }
+  }
+
+  $('#pa-new').addEventListener('click', () => {
+    const md = modal({
+      title: 'Tambah Akun Panel',
+      wide: true,
+      body: `
+        <div class="field"><label>Username</label><input class="input" id="na-user" placeholder="cth: andi"></div>
+        <div class="field"><label>Nama lengkap</label><input class="input" id="na-fullname" placeholder="opsional"></div>
+        <div class="field"><label>Role</label>
+          <select class="select" id="na-role">${Object.entries(roles).map(([k, v]) => `<option value="${esc(k)}">${esc(v)} (${esc(k)})</option>`).join('')}</select>
+        </div>
+        <div class="field"><label>Permission (fitur yang bisa diakses)</label>
+          <div id="na-perms" style="display:flex;flex-wrap:wrap;gap:8px">${permCheckboxes(panelDefaultPerms)}</div>
+          <p class="muted" style="font-size:12px;margin-top:6px">Role <strong>admin</strong> otomatis mendapat semua permission.</p>
+        </div>
+        <div class="field"><label class="checkline"><input type="checkbox" id="na-active" checked> Akun aktif</label></div>
+        <div class="field"><label>Password (minimal 6 karakter)</label><input class="input" id="na-pass" type="password" autocomplete="new-password" required></div>`,
+      footer: `<button class="btn btn-sm" id="na-cancel">Batal</button><button class="btn btn-sm btn-primary" id="na-save">Buat</button>`,
+    });
+    const naPerms = md.querySelectorAll('#na-perms input[type="checkbox"]');
+    $('#na-role').addEventListener('change', () => {
+      const isAdminRole = $('#na-role').value === 'admin';
+      naPerms.forEach((cb) => { cb.disabled = isAdminRole; });
+    });
+    $('#na-cancel').addEventListener('click', closeModal);
+    $('#na-save').addEventListener('click', async () => {
+      const role = $('#na-role').value;
+      const checked = [...md.querySelectorAll('#na-perms input[type="checkbox"]:checked')].map((cb) => cb.value);
+      const payload = {
+        username: $('#na-user').value.trim(),
+        password: $('#na-pass').value,
+        role,
+        fullName: $('#na-fullname').value,
+        active: $('#na-active').checked,
+        permissions: isAdminRole ? [] : checked,
+      };
+      if (!payload.username) return toast('Username wajib diisi', 'error');
+      if (!/^[a-z_][a-z0-9_.-]{0,63}$/i.test(payload.username)) return toast('Format username tidak valid', 'error');
+      if (!payload.password || payload.password.length < 6) return toast('Password minimal 6 karakter', 'error');
+      try {
+        await api('/api/panel-accounts', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
+        closeModal(); toast('Akun berhasil dibuat'); load();
+      } catch (e) { toast(e.message, 'error'); }
+    });
+  });
+
+  load();
+}
+
+const panelDefaultPerms = ['dashboard', 'files'];
 
 /* ============ SERVICES ============ */
 async function renderServices(el) {
@@ -3054,6 +3266,7 @@ const ROUTES = {
   database: { title: 'Database', render: renderDashboard }, /* di-handle custom di navigate() */
   terminal: { title: 'Web Terminal', render: renderTerminal },
   account: { title: 'Account', render: renderAccount },
+  akun: { title: 'Manajemen Akun', render: renderPanelAccounts },
 };
 
 function navigate() {
@@ -3085,7 +3298,17 @@ function navigate() {
   const route = ROUTES[page];
   $('#page-title').textContent = route.title;
   $$('.nav-item').forEach((a) => a.classList.toggle('active', a.dataset.page === page));
-  if (page === 'database') {
+  // Sembunyikan menu yang tidak diizinkan untuk role/user login ini.
+  const perms = ME ? (ME.permissions || []) : [];
+  $$('.nav-item').forEach((a) => {
+    const perm = a.dataset.perm;
+    a.style.display = (perm && !perms.includes(perm)) ? 'none' : '';
+  });
+  stopDashboardRefresh();
+  if (page === 'dashboard') {
+    route.render($('#page-content'));
+    startDashboardRefresh($('#page-content'));
+  } else if (page === 'database') {
     renderDatabase($('#page-content'), []);
   } else {
     route.render($('#page-content'));

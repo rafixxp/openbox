@@ -2,6 +2,7 @@ const crypto = require('crypto');
 const pty = require('node-pty');
 const os = require('os');
 const fs = require('fs');
+const panelAccounts = require('./panel-accounts');
 
 const TTL = 7 * 24 * 3600 * 1000;
 const COOKIE = 'np_sid';
@@ -176,7 +177,7 @@ function valid(sid) {
   if (!sid || !sessions.has(sid)) return null;
   const s = sessions.get(sid);
   if (Date.now() > s.exp) { sessions.delete(sid); return null; }
-  return s.username;
+  return s;
 }
 
 function prune() {
@@ -219,10 +220,19 @@ function recordSuccess(username) {
 /* ---------- middleware ---------- */
 
 function middleware(req, res, next) {
-  const username = valid(sidFromReq(req));
-  req.sid = username ? sidFromReq(req) : null;
-  req.user = username || null;
-  req.isAdmin = username ? isAdminUser(username) : false;
+  const s = valid(sidFromReq(req));
+  req.sid = s ? sidFromReq(req) : null;
+  if (s) {
+    req.user = s.username;
+    req.role = s.role || 'user';
+    req.permissions = s.permissions || [];
+    req.isAdmin = s.isAdmin || s.role === 'admin';
+  } else {
+    req.user = null;
+    req.role = null;
+    req.permissions = [];
+    req.isAdmin = false;
+  }
   next();
 }
 
@@ -258,10 +268,17 @@ function routes(app) {
     }
 
     let r;
-    try {
-      r = await linuxAuth(uname, password);
-    } catch {
-      r = { ok: false, reason: 'server' };
+    let panel = null;
+    // Coba akun panel (simpan di storage) terlebih dahulu, lalu fallback ke PAM Linux.
+    panel = panelAccounts.authenticate(uname, password);
+    if (panel) {
+      r = { ok: true };
+    } else {
+      try {
+        r = await linuxAuth(uname, password);
+      } catch {
+        r = { ok: false, reason: 'server' };
+      }
     }
     if (!r.ok) {
       recordFail(uname);
@@ -272,13 +289,27 @@ function routes(app) {
     }
     recordSuccess(uname);
     const sid = crypto.randomBytes(24).toString('hex');
-    sessions.set(sid, { username: uname, exp: Date.now() + TTL });
+    const isPanel = !!panel;
+    const isAdmin = isPanel ? panel.role === 'admin' : isAdminUser(uname);
+    const role = isPanel ? panel.role : (isAdmin ? 'admin' : 'user');
+    const permissions = isPanel ? panel.permissions : (isAdmin ? panelAccounts.ALL_PERMISSIONS : panelAccounts.DEFAULT_USER_PERMS);
+    const session = {
+      username: uname,
+      role,
+      permissions,
+      isAdmin,
+      exp: Date.now() + TTL,
+    };
+    sessions.set(sid, session);
     res.setHeader('Set-Cookie', `${COOKIE}=${sid}; Path=/; HttpOnly; SameSite=Strict; Max-Age=${7 * 86400}`);
     res.json({
       ok: true,
       user: {
         username: uname,
-        isAdmin: isAdminUser(uname),
+        isAdmin,
+        role,
+        permissions,
+        panelAccount: isPanel,
       },
     });
   });
@@ -301,6 +332,8 @@ function routes(app) {
         shell: info?.shell,
         uid: info?.uid,
         isAdmin: req.isAdmin,
+        role: req.role || 'user',
+        permissions: req.permissions || [],
       },
     });
   });
@@ -330,6 +363,7 @@ module.exports = {
   middleware,
   requireAuth,
   requireAdmin,
+  requirePermission: panelAccounts.requirePermission,
   routes,
   checkRequest,
   wsUser,
