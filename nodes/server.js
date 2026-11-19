@@ -6,6 +6,7 @@ const { WebSocketServer } = require('ws');
 const { attachTerminal } = require('./src/terminal');
 const auth = require('./src/auth');
 const audit = require('./src/audit');
+const panelAccounts = require('./src/panel-accounts');
 
 const dashboardRoutes = require('./src/routes/dashboard');
 const filesRoutes = require('./src/routes/files');
@@ -44,10 +45,10 @@ app.use('/api/files', audit.files);
 app.post('/api/files/upload', auth.requireAuth, filesExtra.uploadHandler);
 
 app.use('/api/dashboard', auth.requireAuth, auth.requirePermission('dashboard'), dashboardRoutes);
-app.use('/api/files', auth.requireAuth, auth.requirePermission('files'), filesRoutes);
+app.use('/api/files', auth.requireAuth, panelAccounts.requireAnyPermission('files', 'sites'), filesRoutes);
 app.use('/api/services', auth.requireAuth, auth.requirePermission('services'), servicesRoutes);
 app.use('/api/sites', auth.requireAuth, auth.requirePermission('sites'), sitesRoutes);
-app.use('/api/ssl', auth.requireAuth, auth.requirePermission('cloud'), sslRoutes);
+app.use('/api/ssl', auth.requireAuth, auth.requirePermission('sites'), sslRoutes);
 app.use('/api/accounts', auth.requireAuth, accountsRoutes);
 app.use('/api/database', auth.requireAuth, auth.requirePermission('database'), databaseRoutes);
 app.use('/api/panel-accounts', auth.requireAuth, panelAccountsRoutes);

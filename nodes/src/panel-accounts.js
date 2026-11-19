@@ -141,10 +141,14 @@ function getPermissions() { return PERMISSIONS; }
 function getAllPermissions() { return ALL_PERMISSIONS.slice(); }
 
 function requirePermission(permission) {
+  return requireAnyPermission(permission);
+}
+
+function requireAnyPermission(...permissions) {
   return (req, res, next) => {
     if (!req.user) return res.status(401).json({ error: 'Belum login' });
     const perms = req.permissions || [];
-    if (perms.includes('*') || perms.includes(permission)) return next();
+    if (perms.includes('*') || permissions.some((p) => perms.includes(p))) return next();
     return res.status(403).json({ error: 'Akses ditolak: Anda tidak memiliki izin untuk fitur ini' });
   };
 }
@@ -152,5 +156,5 @@ function requirePermission(permission) {
 module.exports = {
   authenticate, listAccounts, createAccount, updateAccount, deleteAccount,
   getPermissions, getAllPermissions, ROLES, ALL_PERMISSIONS, DEFAULT_USER_PERMS,
-  requirePermission, FILE, hashPassword, verifyPassword,
+  requirePermission, requireAnyPermission, FILE, hashPassword, verifyPassword,
 };

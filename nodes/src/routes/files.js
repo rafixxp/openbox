@@ -6,6 +6,7 @@ const os = require('os');
 const { execFile } = require('child_process');
 const multer = require('multer');
 const auth = require('../auth');
+const ownership = require('../site-ownership');
 
 const router = express.Router();
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 200 * 1024 * 1024 } });
@@ -14,11 +15,16 @@ function isRoot() {
   return typeof process.getuid === 'function' ? process.getuid() === 0 : true;
 }
 
-/** root akses file: admin bebas; user biasa terkurung di home dir masing-masing */
+/** root akses file: admin bebas; user biasa di home dir atau docroot situs miliknya */
 function resolveRoot(req, requested) {
   if (req.isAdmin) {
     if (requested && fs.existsSync(requested) && fs.statSync(requested).isDirectory()) return requested;
     return process.env.PANEL_ROOT || os.homedir();
+  }
+  const target = String(requested || '').trim();
+  if (target && ownership.canAccessWebDir(req, target)) {
+    const resolved = path.resolve(target);
+    if (fs.existsSync(resolved) && fs.statSync(resolved).isDirectory()) return resolved;
   }
   return homeOf(req.user) || os.homedir();
 }

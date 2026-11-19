@@ -15,7 +15,7 @@ function envBool(name, fallback) {
 // Layanan yang dilindungi sesuai dokumen kebijakan: Nginx & Certbot.
 const PROTECTED_SERVICES = envList('PANEL_PROTECTED_SERVICES', ['nginx', 'certbot']);
 
-const CERTBOT_LOCKED = envBool('PANEL_LOCK_CERTBOT', true);
+const CERTBOT_LOCKED = envBool('PANEL_LOCK_CERTBOT', false);
 const NGINX_MUTATIONS_ALLOWED = envBool('PANEL_ALLOW_NGINX_MUTATIONS', true);
 const COORDINATION_MESSAGE = 'Aksi tidak tersedia.';
 

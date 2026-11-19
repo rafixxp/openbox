@@ -4,6 +4,7 @@ const path = require('path');
 const { execFile } = require('child_process');
 const auth = require('../auth');
 const policy = require('../policy');
+const ownership = require('../site-ownership');
 
 const exec = (cmd, args, options = {}) =>
   new Promise((resolve) => {
@@ -19,6 +20,11 @@ function isRoot() {
 function execPriv(cmd, args, options = {}) {
   if (isRoot()) return exec(cmd, args, options);
   return exec('sudo', ['-n', cmd, ...args], options);
+}
+
+async function hasNginxPlugin() {
+  const r = await exec('certbot', ['plugins', '--text']);
+  return /^\s*\*\s+nginx\b/m.test((r.stdout || '') + (r.stderr || ''));
 }
 
 const router = express.Router();
@@ -53,13 +59,19 @@ router.get('/info', async (req, res) => {
   res.json({ found: false, domain });
 });
 
-router.post('/renew', auth.requireAdmin, async (req, res) => {
+router.post('/renew', auth.requirePermission('sites'), async (req, res) => {
   if (policy.CERTBOT_LOCKED) {
     return res.status(403).json({ error: policy.COORDINATION_MESSAGE, policy: 'certbot-locked' });
   }
   const certName = String(req.body.certName || '').trim();
   if (!certName || !/^[a-zA-Z0-9._-]+$/.test(certName)) {
     return res.status(400).json({ error: 'certName tidak valid' });
+  }
+  if (!req.isAdmin) {
+    const root = String(req.body.root || '').trim();
+    if (!root || !ownership.canAccessWebDir(req, root)) {
+      return res.status(403).json({ error: 'Akses ditolak: root situs tidak valid / bukan milik Anda' });
+    }
   }
   const result = await execPriv('certbot', ['renew', '--cert-name', certName, '--non-interactive'], { timeout: 300000 });
   res.json({
@@ -68,7 +80,7 @@ router.post('/renew', auth.requireAdmin, async (req, res) => {
   });
 });
 
-router.post('/issue', auth.requireAdmin, async (req, res) => {
+router.post('/issue', auth.requirePermission('sites'), async (req, res) => {
   if (policy.CERTBOT_LOCKED) {
     return res.status(403).json({ error: policy.COORDINATION_MESSAGE, policy: 'certbot-locked' });
   }
@@ -81,13 +93,31 @@ router.post('/issue', auth.requireAdmin, async (req, res) => {
   if (email && !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) {
     return res.status(400).json({ error: 'Email tidak valid' });
   }
-  const args = ['--nginx', '-d', domain, '--non-interactive', '--agree-tos'];
+  let root = '';
+  try { root = path.resolve(fs.realpathSync(String(req.body.root || '').trim())); } catch {}
+  if (!req.isAdmin) {
+    if (!root || !ownership.canAccessWebDir(req, root)) {
+      return res.status(403).json({ error: 'Akses ditolak: root situs tidak valid / bukan milik Anda' });
+    }
+  }
+  const args = ['-d', domain, '--non-interactive', '--agree-tos'];
+  let note;
+  if (await hasNginxPlugin()) {
+    args.unshift('--nginx');
+  } else {
+    if (!root.startsWith('/var/www/')) {
+      return res.status(400).json({ error: 'Plugin nginx certbot tidak tersedia; webroot di /var/www wajib diberikan' });
+    }
+    args.unshift('--webroot', '-w', root);
+    note = 'Plugin certbot-nginx belum terpasang — konfigurasi TLS nginx perlu ditambahkan manual.';
+  }
   if (email) args.push('-m', email);
   else args.push('--register-unsafely-without-email');
   const result = await execPriv('certbot', args, { timeout: 300000 });
   res.json({
     ok: result.code === 0,
-    output: ((result.stdout || '') + '\n' + (result.stderr || '')).trim()
+    output: ((result.stdout || '') + '\n' + (result.stderr || '')).trim(),
+    note
   });
 });
 

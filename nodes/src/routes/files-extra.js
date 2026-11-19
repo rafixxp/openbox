@@ -12,6 +12,7 @@ const path = require('path');
 const os = require('os');
 const multer = require('multer');
 const { isAdminUser } = require('../auth');
+const ownership = require('../site-ownership');
 
 const router = express.Router();
 const MAX_UPLOAD = 100 * 1024 * 1024;
@@ -36,11 +37,16 @@ function homeOf(username) {
 }
 
 function resolveRoot(req, requested) {
-  if (isAdminUser(req.user)) {
+  if (req.isAdmin || isAdminUser(req.user)) {
     if (requested && fs.existsSync(requested) && fs.statSync(requested).isDirectory()) {
       return requested;
     }
     return process.env.PANEL_ROOT || os.homedir();
+  }
+  const target = String(requested || '').trim();
+  if (target && ownership.canAccessWebDir(req, target)) {
+    const resolved = path.resolve(target);
+    if (fs.existsSync(resolved) && fs.statSync(resolved).isDirectory()) return resolved;
   }
   return homeOf(req.user) || os.homedir();
 }

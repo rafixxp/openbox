@@ -108,6 +108,13 @@ function canAccess(req, owner) {
   return !!req.user && !!owner && req.user === owner;
 }
 
+function canAccessWebDir(req, dir) {
+  if (!req) return false;
+  const target = path.resolve(String(dir || ''));
+  if (!target.startsWith(WEB_ROOT + '/')) return false;
+  return canAccess(req, resolveOwner({ name: path.basename(target), root: target }));
+}
+
 module.exports = {
   FILE,
   listUsers,
@@ -116,4 +123,5 @@ module.exports = {
   setOwner,
   resolveOwner,
   canAccess,
+  canAccessWebDir,
 };

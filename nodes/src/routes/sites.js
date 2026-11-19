@@ -211,10 +211,13 @@ router.post('/nginx-test', async (req, res) => {
 
 /* ---------- tulis (admin saja) ---------- */
 
-router.post('/toggle', auth.requireAdmin, async (req, res) => {
+router.post('/toggle', auth.requirePermission('sites'), async (req, res) => {
   if (guardNginxMutation(req, res)) return;
   const { file, enable } = req.body;
   if (!file || !isNginxConfAllowed(file)) return res.status(400).json({ error: 'File harus di direktori sites nginx' });
+  const site = siteForFile(file);
+  if (!site) return res.status(404).json({ error: 'Situs tidak ditemukan' });
+  if (!canAccessSite(req, res, site)) return;
   if (!fs.existsSync(NGINX_SITES_ENABLED)) return res.status(400).json({ error: 'site-enabled tidak ditemukan' });
   const link = path.join(NGINX_SITES_ENABLED, path.basename(file));
   if (enable) {
@@ -233,13 +236,16 @@ router.post('/toggle', auth.requireAdmin, async (req, res) => {
   res.json({ ok: reload.code === 0, enabled: enable, nginxReloadOutput: (reload.stderr || reload.stdout).trim() });
 });
 
-router.post('/config', auth.requireAdmin, async (req, res) => {
+router.post('/config', auth.requirePermission('sites'), async (req, res) => {
   if (guardNginxMutation(req, res)) return;
   try {
     const file = req.body.file;
     if (!file || !isNginxConfAllowed(file)) {
       return res.status(400).json({ error: 'Hanya file di sites-available yang boleh diubah' });
     }
+    const site = siteForFile(file);
+    if (!site) return res.status(404).json({ error: 'Situs tidak ditemukan' });
+    if (!canAccessSite(req, res, site)) return;
     await fsp.writeFile(file, String(req.body.content ?? ''), 'utf8');
     const reload = await runPriv('systemctl', ['reload', 'nginx']);
     res.json({ ok: reload.code === 0, nginxReloadOutput: (reload.stderr || reload.stdout).trim() });
@@ -251,7 +257,7 @@ router.post('/config', auth.requireAdmin, async (req, res) => {
   }
 });
 
-router.post('/git-pull', auth.requireAdmin, async (req, res) => {
+router.post('/git-pull', auth.requirePermission('sites'), async (req, res) => {
   const { dir } = req.body;
   if (!isWebDirSafe(dir) || !fs.existsSync(dir + '/.git')) return res.status(400).json({ error: 'Direktori bukan repo git' });
   if (!canAccessDir(req, res, dir)) return;
@@ -262,9 +268,10 @@ router.post('/git-pull', auth.requireAdmin, async (req, res) => {
   });
 });
 
-router.post('/git-clone', auth.requireAdmin, async (req, res) => {
+router.post('/git-clone', auth.requirePermission('sites'), async (req, res) => {
   const { dir, gitUrl, branch } = req.body;
   if (!isWebDirSafe(dir)) return res.status(400).json({ error: 'Direktori harus di dalam /var/www' });
+  if (!canAccessDir(req, res, dir)) return;
   if (!gitUrl || !/^(https?:\/\/|git@|ssh:\/\/)/.test(gitUrl)) return res.status(400).json({ error: 'Git URL tidak valid' });
 
   let entries = [];
@@ -403,12 +410,28 @@ router.post('/create', auth.requirePermission('sites'), async (req, res) => {
   });
 });
 
-router.post('/delete', auth.requireAdmin, async (req, res) => {
+router.post('/delete', auth.requirePermission('sites'), async (req, res) => {
   if (guardNginxMutation(req, res)) return;
   const { file, dir, deleteDir } = req.body;
   const results = {};
+  if (!file && !(dir && deleteDir)) return res.status(400).json({ error: 'Tidak ada yang dihapus' });
+
+  let fileSite = null;
   if (file) {
     if (!isNginxConfAllowed(file)) return res.status(400).json({ error: 'File harus di direktori sites nginx' });
+    fileSite = siteForFile(file);
+    if (!fileSite && !req.isAdmin) return res.status(404).json({ error: 'Situs tidak ditemukan' });
+    if (!ownership.canAccess(req, fileSite && fileSite.owner)) {
+      return res.status(403).json({ error: 'Akses ditolak: situs ini bukan milik Anda' });
+    }
+  }
+  if (dir && deleteDir) {
+    if (!isWebDirSafe(dir)) return res.status(400).json({ error: 'Tidak boleh menghapus di luar /var/www' });
+    if (path.resolve(dir) === WEB_ROOT) return res.status(400).json({ error: 'Tidak boleh menghapus /var/www itu sendiri' });
+    if (!canAccessDir(req, res, dir)) return;
+  }
+
+  if (file) {
     if (fs.existsSync(file)) await fsp.unlink(file).catch(() => {});
     ownership.setOwner(path.basename(file), null);
     results.configRemoved = true;
@@ -421,8 +444,6 @@ router.post('/delete', auth.requireAdmin, async (req, res) => {
     results.nginxReloaded = reload.code === 0;
   }
   if (dir && deleteDir) {
-    if (!isWebDirSafe(dir)) return res.status(400).json({ error: 'Tidak boleh menghapus di luar /var/www' });
-    if (path.resolve(dir) === WEB_ROOT) return res.status(400).json({ error: 'Tidak boleh menghapus /var/www itu sendiri' });
     await fsp.rm(dir, { recursive: true, force: true });
     results.docrootRemoved = true;
   }

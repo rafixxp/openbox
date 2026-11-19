@@ -2455,6 +2455,8 @@ const SI = {
   trash: `<svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6"/><path d="M10 11v6M14 11v6"/></svg>`,
   pull: `<svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12a9 9 0 0 1-9 9 9 9 0 0 1-9-9 9 9 0 0 1 9-9 9 9 0 0 1 9 9Z"/><path d="M9 13v-3M15 13v-3"/><path d="M12 20a5 5 0 0 0 5-5"/></svg>`,
   plus: `<svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14M12 5v14"/></svg>`,
+  settings: `<svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 21v-7M4 10V3M12 21v-9M12 8V3M20 21v-5M20 12V3M1 14h6M9 8h6M17 16h6"/></svg>`,
+  lock: `<svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>`,
 };
 
 function ownerOptions(owners, selected) {
@@ -2490,28 +2492,6 @@ async function renderSites(el) {
       <div class="card-body borderless-rows" style="padding:0">
         ${sitesTable(data.sites)}
       </div>
-    </div>
-
-    <div class="card">
-      <div class="card-header"><span class="card-title">${SI.folder} Folder /var/www &amp; Git</span></div>
-      <div class="card-body borderless-rows" style="padding:0">
-        ${data.webDirs.length === 0 ? `<div class="empty">Belum ada folder di /var/www</div>` :
-        `<table>
-          <thead><tr><th>Folder</th><th>Pemilik</th><th>Git</th><th>Branch</th><th style="width:210px">Aksi</th></tr></thead>
-          <tbody>
-            ${data.webDirs.map((w) => `<tr>
-              <td><a href="#/site/${esc(w.name)}" style="color:inherit;text-decoration:none;font-weight:500" class="mono">${esc(w.name)}</a></td>
-              <td class="mono">${esc(w.owner || '—')}</td>
-              <td class="mono muted" style="max-width:260px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${esc(w.gitUrl || '')}">${w.hasGit ? esc(w.gitUrl || 'origin tidak ada') : '—'}</td>
-              <td class="mono">${esc(w.branch || '—')}</td>
-              <td class="actions-cell">
-                ${ME?.isAdmin && w.hasGit ? `<button class="btn btn-sm btn-primary" data-pull="${esc(w.path)}">${SI.pull} Git Pull</button>` : ''}
-                ${ME?.isAdmin && !mutationsLocked ? `<button class="btn btn-sm btn-danger" data-delsite="${esc(w.name)}">${SI.trash} Hapus</button>` : ''}
-              </td>
-            </tr>`).join('')}
-          </tbody>
-        </table>`}
-      </div>
     </div>`;
 
   const addBtn = $('#site-add');
@@ -2538,35 +2518,23 @@ async function renderSites(el) {
     } catch (e) { toast(e.message, 'error'); }
   }));
 
-  $$('button[data-pull]').forEach((b) => b.addEventListener('click', async () => {
-    b.disabled = true; b.textContent = 'Pulling…';
-    try {
-      const r = await api('/api/sites/git-pull', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ dir: b.dataset.pull }) });
-      modal({ title: 'Git Pull', body: `<pre class="code">${esc(r.output || 'selesai')}</pre>`, footer: `<button class="btn btn-primary" onclick="closeModal()">OK</button>` });
-    } catch (e) { toast(e.message, 'error'); }
-    b.disabled = false; b.innerHTML = `${SI.pull} Git Pull`;
-  }));
-  $$('button[data-delsite]').forEach((b) => b.addEventListener('click', () => deleteSite(b.dataset.delsite, () => renderSites(el))));
-
   function sitesTable(sites) {
     if (sites.length === 0) return `<div class="empty">Belum ada server block nginx</div>`;
     return `<table>
-        <thead><tr><th>File</th><th>Server name</th><th>Docroot</th><th>Listen</th><th>Status</th><th>Pemilik</th><th style="width:210px">Aksi</th></tr></thead>
+        <thead><tr><th>File</th><th>Server name</th><th>Status</th><th>Pemilik</th><th style="width:210px">Aksi</th></tr></thead>
         <tbody>
           ${sites.map((s) => {
             const name = s.filename;
             return `<tr>
             <td class="mono"><a href="#/site/${esc(name)}" style="color:inherit;text-decoration:none">${esc(s.filename)}</a></td>
             <td class="mono">${esc(s.serverName || '-')}</td>
-            <td class="mono muted" style="max-width:220px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(s.root || '-')}</td>
-            <td class="mono muted">${esc(s.listen || '-')}</td>
             <td><span class="badge ${s.enabled ? 'badge-success' : ''}">${s.enabled ? 'enabled' : 'disabled'}</span></td>
             <td class="mono">
               ${ME?.isAdmin ? `<select class="input" style="padding:4px 6px" data-owner-for="${esc(name)}">${ownerOptions(data.assignableUsers, s.owner)}</select>` : esc(s.owner || '—')}
             </td>
             <td class="actions-cell">
               <a class="btn btn-sm btn-primary" href="#/site/${esc(name)}">${SI.info} Detail</a>
-              ${ME?.isAdmin && !mutationsLocked ? `<button class="btn btn-sm btn-danger" data-delconf="${esc(s.file)}">${SI.trash} Hapus conf</button>` : ''}
+              ${!mutationsLocked ? `<button class="btn btn-sm btn-danger" data-delconf="${esc(s.file)}">${SI.trash} Hapus conf</button>` : ''}
             </td>
           </tr>`;
           }).join('')}
@@ -2576,13 +2544,15 @@ async function renderSites(el) {
 
 }
 
-function deleteSite(name, onDone) {
+function deleteSite(name, onDone, opts = {}) {
+  const dir = opts.dir || `/var/www/${name}`;
+  const file = opts.file || `/etc/nginx/sites-available/${name}`;
   const md = modal({
     title: `Hapus website: ${esc(name)}`,
     body: `
       <p style="margin-bottom:12px">Pilih apa saja yang ingin dihapus:</p>
-      <div class="field"><label><input type="checkbox" id="del-conf" checked> Konfigurasi nginx (sites-available & enabled)</label></div>
-      <div class="field"><label><input type="checkbox" id="del-dir" checked> Folder <span class="mono">/var/www/${esc(name)}</span></label></div>`,
+      <div class="field"><label><input type="checkbox" id="del-conf" checked> Konfigurasi nginx (sites-available &amp; enabled)</label></div>
+      <div class="field"><label><input type="checkbox" id="del-dir" checked> Folder <span class="mono">${esc(dir)}</span></label></div>`,
     footer: `<button class="btn" onclick="closeModal()">Batal</button><button class="btn btn-danger" id="del-go">Hapus</button>`,
   });
   $('#del-go', md).addEventListener('click', async () => {
@@ -2591,9 +2561,9 @@ function deleteSite(name, onDone) {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          dir: `/var/www/${name}`,
+          dir,
           deleteDir: $('#del-dir').checked,
-          file: $('#del-conf').checked ? `/etc/nginx/sites-available/${name}` : undefined,
+          file: $('#del-conf').checked ? file : undefined,
         }),
       });
       closeModal(); toast('Website dihapus'); onDone && onDone();
@@ -2659,6 +2629,7 @@ async function renderSiteDetail(el, name, tab) {
   const tabs = ['overview', 'files', 'git', 'nginx', 'ssl'];
   const titles = { overview: 'Overview', files: 'Files', git: 'Git', nginx: 'Nginx', ssl: 'SSL' };
   const active = tabs.includes(tab) ? tab : 'overview';
+  const canMutate = !!site && !data.mutationsLocked;
 
   el.innerHTML = `
     <div class="site-head">
@@ -2672,8 +2643,8 @@ async function renderSiteDetail(el, name, tab) {
         </div>
       </div>
       <div style="display:flex;gap:8px">
-        ${ME?.isAdmin && !data.mutationsLocked && site ? `<button class="btn btn-sm" id="sd-toggle">${site.enabled ? 'Disable' : 'Enable'}</button>` : ''}
-        ${ME?.isAdmin && !data.mutationsLocked ? `<button class="btn btn-sm btn-danger" id="sd-delete">Hapus Website</button>` : ''}
+        ${canMutate ? `<button class="btn btn-sm" id="sd-toggle">${site.enabled ? 'Disable' : 'Enable'}</button>` : ''}
+        ${canMutate ? `<button class="btn btn-sm btn-danger" id="sd-delete">Hapus Website</button>` : ''}
       </div>
     </div>
 
@@ -2688,7 +2659,7 @@ async function renderSiteDetail(el, name, tab) {
   }));
 
   const delBtn = $('#sd-delete');
-  if (delBtn) delBtn.addEventListener('click', () => deleteSite(name, () => { location.hash = '#/sites'; }));
+  if (delBtn) delBtn.addEventListener('click', () => deleteSite(name, () => { location.hash = '#/sites'; }, { dir: docroot(), file: site.file }));
   const toggle = $('#sd-toggle');
   if (toggle) toggle.addEventListener('click', async () => {
     if (!site) return;
@@ -2725,10 +2696,10 @@ async function renderSiteDetail(el, name, tab) {
 
         </dl></div></div>
         <div class="card"><div class="card-header"><span class="card-title">Aksi Cepat</span></div><div class="card-body" style="display:flex;flex-direction:column;gap:10px">
-          <button class="btn" data-goto="files">📝 Kelola file website</button>
-          <button class="btn" data-goto="git">⬇️ Git Pull</button>
-          <button class="btn" data-goto="nginx">⚙️ Edit konfigurasi nginx</button>
-          <button class="btn" data-goto="ssl">🔒 SSL / sertifikat</button>
+          <button class="btn" data-goto="files">${SI.folder} Kelola file website</button>
+          <button class="btn" data-goto="git">${SI.pull} Git Pull</button>
+          <button class="btn" data-goto="nginx">${SI.settings} Edit konfigurasi nginx</button>
+          <button class="btn" data-goto="ssl">${SI.lock} SSL / sertifikat</button>
         </div></div>
       </div>`;
     $$('[data-goto]', container).forEach((b) => b.addEventListener('click', () => location.hash = `#/site/${name}/${b.dataset.goto}`));
@@ -2751,10 +2722,9 @@ async function renderSiteDetail(el, name, tab) {
           <div class="card-header"><span class="card-title">Git</span></div>
           <div class="empty">
             Folder ini belum dihubungkan dengan repository Git.
-            ${ME?.isAdmin ? `
             <div style="margin-top:14px">
               <button class="btn btn-primary" id="git-connect">Hubungkan Repo</button>
-            </div>` : '<div class="muted" style="font-size:12px;margin-top:8px">Menghubungkan repo hanya oleh administrator.</div>'}
+            </div>
           </div>
         </div>`;
       const gconn = $('#git-connect', container);
@@ -2766,7 +2736,7 @@ async function renderSiteDetail(el, name, tab) {
       <div class="card">
         <div class="card-header">
           <span class="card-title">Repository</span>
-          ${ME?.isAdmin ? `<button class="btn btn-sm btn-primary" id="git-pull">Git Pull</button>` : ''}
+          <button class="btn btn-sm btn-primary" id="git-pull">Git Pull</button>
         </div>
         <div class="card-body"><dl class="kv">
           <dt>Remote origin</dt><dd>${esc(g.gitUrl || '-')}</dd>
@@ -2783,14 +2753,14 @@ async function renderSiteDetail(el, name, tab) {
         </div>
       </div>`;
 
-    $('#git-pull', container).addEventListener('click', async () => {
-      const b = $('#git-pull', container);
-      b.disabled = true; b.textContent = 'Pulling…';
+    const gp = $('#git-pull', container);
+    if (gp) gp.addEventListener('click', async () => {
+      gp.disabled = true; gp.textContent = 'Pulling…';
       try {
         const r = await api('/api/sites/git-pull', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ dir: docroot() }) });
         modal({ title: 'Git Pull', wide: true, body: `<pre class="code">${esc(r.output || 'selesai')}</pre>`, footer: `<button class="btn btn-primary" onclick="closeModal()">OK</button>` });
       } catch (e) { toast(e.message, 'error'); }
-      b.disabled = false; b.textContent = 'Git Pull';
+      gp.disabled = false; gp.textContent = 'Git Pull';
     });
 
     async function connectRepo() {
@@ -2832,7 +2802,7 @@ async function renderSiteDetail(el, name, tab) {
         <div class="card-header">
           <span class="card-title">Konfigurasi Nginx — <span class="mono">${esc(site.file)}</span></span>
           <div style="display:flex;gap:8px">
-            ${ME?.isAdmin && !data.mutationsLocked ? `<button class="btn btn-sm" id="cfg-nginx-test">Test Config</button>
+            ${!data.mutationsLocked ? `<button class="btn btn-sm" id="cfg-nginx-test">Test Config</button>
             <button class="btn btn-sm btn-primary" id="cfg-save">Simpan & Reload</button>` : ''}
           </div>
         </div>
@@ -2891,14 +2861,52 @@ async function renderSiteDetail(el, name, tab) {
               <dt>Berlaku hingga</dt><dd>${esc(info.notAfter || '-')} <span class="muted">(${info.daysLeft} hari lagi)</span></dd>
               <dt>Lokasi</dt><dd>${esc(info.dir || '-')}</dd>
             </dl>
+            <div style="margin-top:14px;display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+              <button class="btn btn-primary" id="ssl-renew">Perpanjang SSL</button>
+              <span class="muted">certbot renew --cert-name ${esc(info.certName || domain)}</span>
+            </div>
            ` : `
                <div class="empty">
                  Belum ada sertifikat SSL untuk <b>${esc(domain)}</b>.
+                 <div style="margin-top:14px;max-width:420px;margin-left:auto;margin-right:auto;text-align:left">
+                   <div class="field"><label>Email untuk notifikasi Let's Encrypt (opsional)</label><input class="input mono" id="ssl-email" placeholder="admin@example.com"></div>
+                   <button class="btn btn-primary" id="ssl-issue">Issue SSL</button>
+                 </div>
                </div>
 
-          `}
+           `}
         </div>
       </div>`;
+
+    const renew = $('#ssl-renew', container);
+    if (renew) renew.addEventListener('click', async () => {
+      renew.disabled = true; renew.textContent = 'Memperpanjang…';
+      try {
+        const r = await api('/api/ssl/renew', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ certName: info.certName || domain, root: docroot() }) });
+        showCertbotResult('Perpanjang SSL', r);
+      } catch (e) { toast(e.message, 'error'); }
+      renew.disabled = false; renew.textContent = 'Perpanjang SSL';
+    });
+
+    const issue = $('#ssl-issue', container);
+    if (issue) issue.addEventListener('click', async () => {
+      issue.disabled = true; issue.textContent = 'Issuing…';
+      try {
+        const r = await api('/api/ssl/issue', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ domain, email: $('#ssl-email', container).value.trim(), root: docroot() }) });
+        showCertbotResult('Issue SSL', r);
+        if (r.ok) fillSsl(container);
+      } catch (e) { toast(e.message, 'error'); }
+      issue.disabled = false; issue.textContent = 'Issue SSL';
+    });
+  }
+
+  function showCertbotResult(title, r) {
+    modal({
+      title,
+      wide: true,
+      body: `${r.note ? `<p class="muted">${esc(r.note)}</p>` : ''}<pre class="code">${esc(r.output || 'selesai')}</pre>`,
+      footer: `<button class="btn btn-primary" onclick="closeModal()">OK</button>`
+    });
   }
 }
 
