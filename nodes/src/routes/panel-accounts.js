@@ -23,6 +23,7 @@ router.post('/', (req, res) => {
     role: b.role,
     permissions: b.permissions,
     fullName: b.fullName,
+    active: b.active,
   });
   if (!r.ok) return res.status(400).json({ error: r.error });
   res.status(201).json({ ok: true, account: r.account });

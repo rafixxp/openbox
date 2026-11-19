@@ -142,14 +142,15 @@ html, body {
   font-size: 12px;
   margin-bottom: 14px;
 }
-.login-submit { justify-content: center; width: 100%; padding: 9px 12px; }
+.login-submit { justify-content: center; width: 100%; padding: 9px 20px; }
 .login-hint { margin-top: 20px; font-size: 11px; color: var(--muted); text-align: center; line-height: 1.5; }
 
 /* ---------- Main ---------- */
 .main { flex: 1; display: flex; flex-direction: column; overflow-y: auto; }
 
 .topbar {
-  display: flex;
+  display: flex;/bin/bash
+
   align-items: center;
   justify-content: space-between;
   padding: 20px 32px;

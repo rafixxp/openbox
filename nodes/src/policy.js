@@ -1,20 +1,5 @@
 'use strict';
 
-/**
- * Kebijakan operasional "Pengelolaan Services (Khusus)".
- *
- * Layanan inti host (Nginx & SSL Certbot) dikelola secara eksklusif oleh
- * dosen/pembicara. Panel (NodePanel) tidak boleh melakukan start/stop/restart/
- * reload/disable pada layanan tersebut, tidak boleh menerbitkan/memperpanjang
- * sertifikat (certbot), dan tidak boleh memutasi vhost nginx (create/edit/
- * toggle/delete) — semua status hanya read-only.
- *
- * Konfigurasi dapat disesuaikan lewat environment variable saat build/pengemasan:
- *   PANEL_PROTECTED_SERVICES       daftar layanan terlindung (default: nginx,certbot)
- *   PANEL_LOCK_CERTBOT             "0" untuk membuka renew/issue certbot (default: terkunci)
- *   PANEL_ALLOW_NGINX_MUTATIONS    "1" untuk membuka mutasi vhost nginx (default: terkunci)
- */
-
 function envList(name, fallback) {
   const raw = process.env[name];
   if (raw === undefined) return fallback;
@@ -30,13 +15,9 @@ function envBool(name, fallback) {
 // Layanan yang dilindungi sesuai dokumen kebijakan: Nginx & Certbot.
 const PROTECTED_SERVICES = envList('PANEL_PROTECTED_SERVICES', ['nginx', 'certbot']);
 
-// Certbot (issue/renew) dikelola eksklusif dosen/pembicara.
 const CERTBOT_LOCKED = envBool('PANEL_LOCK_CERTBOT', true);
-
-// Mutasi vhost nginx (create/edit/toggle/delete + reload nginx) terkunci.
-const NGINX_MUTATIONS_ALLOWED = envBool('PANEL_ALLOW_NGINX_MUTATIONS', false);
-
-const COORDINATION_MESSAGE = '';
+const NGINX_MUTATIONS_ALLOWED = envBool('PANEL_ALLOW_NGINX_MUTATIONS', true);
+const COORDINATION_MESSAGE = 'Aksi tidak tersedia.';
 
 function baseName(name) {
   return String(name || '').replace(/\.service$/, '').toLowerCase();

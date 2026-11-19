@@ -3,6 +3,8 @@ const fs = require('fs');
 const os = require('os');
 const { execFile } = require('child_process');
 const auth = require('../auth');
+const accountAccess = require('../account-access');
+const panelAccounts = require('../panel-accounts');
 
 const router = express.Router();
 
@@ -68,7 +70,15 @@ function isSudo(groups) {
   return ['sudo', 'wheel', 'admin'].some((g) => groups.includes(g));
 }
 
-router.get('/', auth.requireAdmin, async (req, res) => {
+function validateAccess(role, permissions) {
+  if (!panelAccounts.ROLES[role]) return 'Role tidak valid (admin/user)';
+  if (!Array.isArray(permissions)) return 'Permission harus berupa daftar izin';
+  const invalid = permissions.filter((p) => typeof p !== 'string' || !panelAccounts.ALL_PERMISSIONS.includes(p));
+  if (invalid.length) return `Permission tidak dikenal: ${invalid.join(', ')}`;
+  return null;
+}
+
+router.get('/', auth.requirePermission('account'), async (req, res) => {
   try {
     const passwd = readPasswd();
     const users = passwd.filter((u) => u.uid >= MIN_UID);
@@ -76,6 +86,7 @@ router.get('/', auth.requireAdmin, async (req, res) => {
     const states = await lockStates(names);
     const result = users.map((u) => {
       const groups = readGroup().filter((g) => g.members.includes(u.name) || g.gid === u.gid).map((g) => g.name);
+      const access = accountAccess.resolveAccess(u.name, isSudo(groups) || u.uid === 0);
       return {
         name: u.name,
         uid: u.uid,
@@ -86,18 +97,31 @@ router.get('/', auth.requireAdmin, async (req, res) => {
         status: states[u.name],
         sudo: isSudo(groups),
         groups,
+        role: access.role,
+        permissions: access.permissions,
         loginable: !SYSTEM_SHELLS.includes(u.shell) && states[u.name] !== 'locked',
       };
     });
-    res.json({ users: result, root: os.userInfo().username, iAmRoot: typeof process.getuid !== 'function' || process.getuid() === 0 });
+    res.json({
+      users: result,
+      roles: panelAccounts.ROLES,
+      permissions: panelAccounts.getPermissions(),
+      allPermissions: panelAccounts.ALL_PERMISSIONS,
+      root: os.userInfo().username,
+      iAmRoot: typeof process.getuid !== 'function' || process.getuid() === 0,
+    });
   } catch (e) {
     res.status(500).json({ error: e.message });
   }
 });
 
-router.post('/', auth.requireAdmin, async (req, res) => {
+router.post('/', auth.requirePermission('account'), async (req, res) => {
   const b = req.body || {};
   try {
+    const role = b.role === undefined ? 'user' : String(b.role);
+    const permissions = b.permissions === undefined ? panelAccounts.DEFAULT_USER_PERMS : b.permissions;
+    const accessError = validateAccess(role, permissions);
+    if (accessError) return res.status(400).json({ error: accessError });
     if (!NAME_RE.test(b.name || '')) return res.status(400).json({ error: 'Nama akun tidak valid (huruf/angka/_)' });
     if (readPasswd().some((u) => u.name === b.name)) return res.status(409).json({ error: 'Nama akun sudah dipakai' });
     if (!b.password || String(b.password).length < 8) return res.status(400).json({ error: 'Password wajib diisi (minimal 8 karakter)' });
@@ -121,7 +145,13 @@ router.post('/', auth.requireAdmin, async (req, res) => {
       }
     }
 
+    const home = String(b.home || '').trim();
+    if (home && (!home.startsWith('/') || home.includes('..') || /[\r\n\0]/.test(home))) {
+      return res.status(400).json({ error: 'Home directory tidak valid (harus path absolut)' });
+    }
+
     const args = ['-m', '-s', shell];
+    if (home) args.push('-d', home);
     if (b.gecos) args.push('-c', String(b.gecos).slice(0, 200));
     if (groups) args.push('-G', groups);
     args.push('--', b.name);
@@ -157,23 +187,54 @@ router.post('/', auth.requireAdmin, async (req, res) => {
         return res.status(500).json({ error: (s.stderr || 'gagal set sudo; akun dibatalkan').trim() });
       }
     }
-    res.json({ ok: true });
+    try {
+      accountAccess.saveAccess(b.name, role, permissions);
+    } catch (e) {
+      await runRoot('userdel', ['-r', '--', b.name]);
+      return res.status(500).json({ error: (e.message || 'gagal menyimpan role/permission; akun dibatalkan') });
+    }
+    res.status(201).json({ ok: true });
   } catch (e) {
     res.status(500).json({ error: e.message });
   }
 });
 
-router.put('/:name', auth.requireAdmin, async (req, res) => {
+router.put('/:name', auth.requirePermission('account'), async (req, res) => {
   const name = req.params.name;
   const b = req.body || {};
   try {
     const exists = managedUser(name);
     if (!exists) return res.status(404).json({ error: 'Akun tidak ditemukan atau akun sistem dilindungi' });
 
+    const groups = readGroup().filter((g) => g.members.includes(name) || g.gid === exists.gid).map((g) => g.name);
+    const current = accountAccess.resolveAccess(name, isSudo(groups) || exists.uid === 0);
+    const role = b.role === undefined ? current.role : String(b.role);
+    const permissions = b.permissions === undefined ? current.permissions : b.permissions;
+    const accessError = validateAccess(role, permissions);
+    if (accessError) return res.status(400).json({ error: accessError });
+    const nextAccess = accountAccess.normalize(role, permissions);
+    if (name === req.user && !nextAccess.includes('account')) {
+      return res.status(400).json({ error: 'Tidak bisa mencabut izin Manajemen Akun dari akun sendiri' });
+    }
+
+    if (b.shell) {
+      const validShells = fs.existsSync('/etc/shells')
+        ? fs.readFileSync('/etc/shells', 'utf8').split('\n').map((v) => v.trim()).filter((v) => v.startsWith('/'))
+        : ['/bin/bash', '/bin/sh'];
+      if (!validShells.includes(String(b.shell)) || SYSTEM_SHELLS.includes(String(b.shell))) {
+        return res.status(400).json({ error: 'Shell tidak valid atau tidak dapat digunakan untuk login' });
+      }
+    }
+
+    const home = String(b.home || '').trim();
+    if (home && (!home.startsWith('/') || home.includes('..') || /[\r\n\0]/.test(home))) {
+      return res.status(400).json({ error: 'Home directory tidak valid (harus path absolut)' });
+    }
+
     const mods = [];
     if (b.gecos !== undefined) mods.push(['-c', String(b.gecos)]);
     if (b.shell) mods.push(['-s', String(b.shell)]);
-    if (b.home) mods.push(['-d', String(b.home)]);
+    if (home && home !== exists.home) mods.push(['-m', '-d', home]);
     for (const m of mods) {
       const r = await runRoot('usermod', [...m, '--', name]);
       if (r.code !== 0) return res.status(500).json({ error: (r.stderr || 'usermod gagal').trim() });
@@ -217,13 +278,22 @@ router.put('/:name', auth.requireAdmin, async (req, res) => {
       });
       if (pr.code !== 0) return res.status(500).json({ error: (pr.stderr || 'gagal set password').trim() });
     }
+
+    if (b.role !== undefined || b.permissions !== undefined) {
+      try {
+        accountAccess.saveAccess(name, role, nextAccess);
+        auth.refreshAccess(name);
+      } catch (e) {
+        return res.status(500).json({ error: (e.message || 'gagal menyimpan role/permission').trim() });
+      }
+    }
     res.json({ ok: true });
   } catch (e) {
     res.status(500).json({ error: e.message });
   }
 });
 
-router.delete('/:name', auth.requireAdmin, async (req, res) => {
+router.delete('/:name', auth.requirePermission('account'), async (req, res) => {
   const name = req.params.name;
   try {
     if (name === req.user) return res.status(400).json({ error: 'Tidak bisa menghapus akun yang sedang login' });
@@ -231,6 +301,7 @@ router.delete('/:name', auth.requireAdmin, async (req, res) => {
     const cmdArgs = req.query.removeHome === '1' ? ['-r', '--'] : ['--'];
     const r = await runRoot('userdel', cmdArgs.concat(name));
     if (r.code !== 0) return res.status(500).json({ error: (r.stderr || 'userdel gagal').trim() });
+    accountAccess.removeAccess(name);
     res.json({ ok: true });
   } catch (e) {
     res.status(500).json({ error: e.message });

@@ -92,7 +92,7 @@ function normalizePermissions(role, permissions) {
   return DEFAULT_USER_PERMS.slice();
 }
 
-function createAccount({ username, password, role, permissions, fullName }) {
+function createAccount({ username, password, role, permissions, fullName, active }) {
   const accounts = readAccounts();
   if (findAccount(accounts, username)) return { ok: false, error: 'Username sudah digunakan' };
   if (!NAME_RE.test(String(username || ''))) return { ok: false, error: 'Username tidak valid' };
@@ -105,7 +105,7 @@ function createAccount({ username, password, role, permissions, fullName }) {
     role,
     permissions: normalizePermissions(role, permissions),
     fullName: fullName || '',
-    active: true,
+    active: active !== false,
     createdAt: new Date().toISOString(),
     passwordHash: hashPassword(password),
   };

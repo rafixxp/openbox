@@ -139,8 +139,6 @@ router.post('/action', auth.requireAdmin, async (req, res) => {
   // proses non-service (mis. pm2 tanpa unit systemd) tidak bisa dikontrol systemctl
   const unit = name.endsWith('.service') ? name : name + '.service';
 
-  // Kebijakan "Pengelolaan Services (Khusus)": Nginx & Certbot dikelola
-  // eksklusif dosen/pembicara — hanya status (read-only) yang diizinkan.
   if (action !== 'status' && policy.isProtectedService(unit)) {
     return res.status(403).json({
       error: policy.COORDINATION_MESSAGE,

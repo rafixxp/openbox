@@ -84,9 +84,9 @@ attachTerminal(wss);
 server.on('upgrade', (req, socket, head) => {
   const { pathname } = new URL(req.url, 'http://localhost');
   if (pathname === '/terminal') {
-    // terminal hanya untuk sesi login yang valid; user diteruskan ke handler
+    // terminal hanya untuk sesi login dengan izin terminal
     const username = auth.wsUser(req);
-    if (!username) { socket.destroy(); return; }
+    if (!username || !auth.wsCan(req, 'terminal')) { socket.destroy(); return; }
     wss.handleUpgrade(req, socket, head, (ws) => {
       wss.emit('connection', ws, req, username);
     });

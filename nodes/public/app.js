@@ -17,7 +17,7 @@ function startDashboardRefresh(el) {
     try {
       const d = await api('/api/dashboard');
       if (!d) return;
-      const kpiElements = el.querySelectorAll('.kpi-value');
+      const kpiElements = el.querySelectorAll('[data-dashboard-kpi]');
       if (kpiElements.length >= 4) {
         kpiElements[0].textContent = `${Math.round(d.cpu.loadPercent)}%`;
         kpiElements[1].textContent = `${Math.round(d.memory.usePercent)}%`;
@@ -39,6 +39,14 @@ function stopDashboardRefresh() {
     clearInterval(dashboardInterval);
     dashboardInterval = null;
   }
+}
+
+function discRoot(disks) {
+  const root = disks.find((x) => x.mount === '/') || disks[0];
+  if (!root) return '-';
+  return root.usePercent !== null && root.usePercent !== undefined
+    ? `${root.usePercent}%`
+    : `${fmtBytes(root.used)} / ${fmtBytes(root.total)}`;
 }
 
 async function api(url, options) {
@@ -231,30 +239,8 @@ async function renderDashboard(el) {
 
   const isAdmin = !!(ME && ME.role === 'admin');
 
-  // Auto-refresh dashboard setiap 10 detik (dihentikan saat pindah halaman)
-  dashboardInterval = setInterval(async () => {
-    try {
-      const d = await api('/api/dashboard');
-      if (!d) return;
-      const KEs = document.querySelectorAll('.kpi-value');
-      if (KE.length >= 4) {
-        KEs[0].textContent = `${Math.round(d.cpu.loadPercent)}%`;
-        KEs[1].textContent = `${Math.round(d.memory.usePercent)}%`;
-        KEs[2].textContent = discRoot(d.disks);
-        KEs[3].textContent = fmtUptime(d.uptime);
-      }
-    } catch(e) {}
-  }, 10000);
-
-  function discRoot(disks) {
-    const root = disks.find((x) => x.mount === '/') || disks[0];
-    if (!root) return '-';
-    return root.usePercent !== null && root.usePercent !== undefined
-      ? `${root.usePercent}%`
-      : `${fmtBytes(root.used)} / ${fmtBytes(root.total)}`;
-  }
-
-  const ICON_STROKE = 'class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"';
+    const ICON_STROKE = 
+ 'class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"';
   const DI = {
     cpu: `<svg ${ICON_STROKE}><path d="M6 6h.01M6 18h.01M18 6h.01M18 18h.01"/><rect x="4" y="4" width="16" height="16" rx="2"/><rect x="9" y="9" width="6" height="6"/></svg>`,
     ram: `<svg ${ICON_STROKE}><path d="M6 19v-3M10 19v-3M14 19v-3M18 19v-3"/><rect x="3" y="5" width="18" height="11" rx="2"/><path d="M8 9h.01M12 9h.01M16 9h.01"/></svg>`,
@@ -279,7 +265,7 @@ async function renderDashboard(el) {
       ${kpi.map((k) => `
         <div class="card"><div class="card-body">
           <div class="kpi-label"><span class="kpi-icon">${k.icon}</span>${k.label}</div>
-          <div class="kpi-value">${esc(k.value)}</div>
+          <div class="kpi-value" data-dashboard-kpi>${esc(k.value)}</div>
           <div class="kpi-sub">${esc(k.sub)}</div>
         </div></div>`).join('')}
     </div>
@@ -1955,6 +1941,244 @@ async function doReq(fn, closeModalFn, refresh) {
   }
 }
 
+/* ============ MANAJEMEN AKUN LINUX (CRUD user lokal) ============ */
+async function renderManageAccounts(el) {
+  if (!ME || !ME.permissions || !ME.permissions.includes('account')) {
+    el.innerHTML = `<div class="card"><div class="empty">Anda tidak memiliki izin untuk mengelola akun.</div></div>`;
+    return;
+  }
+
+  el.innerHTML = `
+    <div class="card">
+      <div class="card-header" style="display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap">
+        <span class="card-title">Akun Linux</span>
+        <div style="display:flex;gap:8px">
+          <button class="btn btn-sm" id="ma-refresh">Refresh</button>
+          <button class="btn btn-sm btn-primary" id="ma-new">+ Tambah Akun</button>
+        </div>
+      </div>
+      <div style="padding:0" id="ma-table"><div class="empty"><span class="spinner"></span>&nbsp; Memuat akun...</div></div>
+    </div>`;
+
+  const tb = $('#ma-table');
+  const self = ME.username;
+  const defaultPerms = ['dashboard', 'files'];
+  let meta = { roles: { admin: 'Administrator', user: 'User' }, permissions: {}, allPermissions: [] };
+
+  async function load() {
+    tb.innerHTML = `<div class="empty"><span class="spinner"></span>&nbsp; Memuat akun...</div>`;
+    let data;
+    try { data = await api('/api/accounts'); }
+    catch (e) { tb.innerHTML = `<div class="empty" style="color:var(--danger)">${esc(e.message)}</div>`; return; }
+    meta = {
+      roles: data.roles || meta.roles,
+      permissions: data.permissions || meta.permissions,
+      allPermissions: data.allPermissions || Object.keys(data.permissions || meta.permissions),
+    };
+
+    let html = '';
+    if (!data.iAmRoot) {
+      html += `<p class="muted" style="font-size:12px;margin:0 0 10px;color:var(--danger)">Server panel tidak berjalan sebagai root / sudo NOPASSWD — operasi tulis akan ditolak sistem.</p>`;
+    }
+    if (!data.users.length) {
+      tb.innerHTML = html + `<div class="empty">Belum ada akun user. Klik "+ Tambah Akun".</div>`;
+      return;
+    }
+
+    html += `<div class="table-scroll"><table>
+      <thead><tr>
+        <th>Akun</th><th>UID</th><th>Home</th><th>Shell</th><th>Role</th><th>Izin</th><th>Status</th><th style="width:230px">Aksi</th>
+      </tr></thead>
+      <tbody>
+        ${data.users.map((u) => `<tr>
+          <td><span class="mono" style="font-weight:600">${esc(u.name)}</span>${u.name === self ? ' <span class="badge badge-success">Anda</span>' : ''}${u.gecos ? `<div class="muted" style="font-size:11px">${esc(u.gecos)}</div>` : ''}</td>
+          <td class="mono muted">${u.uid}</td>
+          <td class="mono muted" style="word-break:break-all">${esc(u.home || '-')}</td>
+          <td class="mono muted">${esc(u.shell || '-')}</td>
+          <td><span class="badge ${u.role === 'admin' ? 'badge-danger' : ''}">${esc(u.role)}</span></td>
+          <td class="muted" style="font-size:12px;min-width:180px">${(u.permissions || []).map((p) => esc(meta.permissions[p] || p)).join(', ') || '—'}</td>
+          <td>${
+            u.status === 'locked' ? '<span class="badge badge-danger">locked</span>'
+            : u.status === 'none' ? '<span class="badge">tanpa password</span>'
+            : '<span class="badge badge-success">aktif</span>'
+          }</td>
+          <td class="actions-cell td-actions">
+            <button class="btn btn-sm" data-ma="edit" data-n="${esc(u.name)}">Edit</button>
+            ${u.name === self ? '' : `
+              <button class="btn btn-sm" data-ma="lock" data-n="${esc(u.name)}" data-lock="${u.status === 'locked' ? '1' : ''}">${u.status === 'locked' ? 'Unlock' : 'Lock'}</button>
+              <button class="btn btn-sm btn-danger" data-ma="del" data-n="${esc(u.name)}">Hapus</button>`}
+          </td>
+        </tr>`).join('')}
+      </tbody></table></div>`;
+    tb.innerHTML = html;
+    $$('[data-ma]', tb).forEach((btn) => btn.addEventListener('click', () => act(btn)));
+  }
+
+  function roleOptions(selected) {
+    return Object.entries(meta.roles).map(([key, label]) =>
+      `<option value="${esc(key)}" ${key === selected ? 'selected' : ''}>${esc(label)} (${esc(key)})</option>`).join('');
+  }
+
+  function permCheckboxes(selected = []) {
+    if (!meta.allPermissions.length) return `<p class="muted" style="font-size:12px;margin:0">Daftar izin tidak tersedia.</p>`;
+    return meta.allPermissions.map((key) =>
+      `<label class="checkline" style="display:block;padding:3px 0"><input type="checkbox" value="${esc(key)}" ${selected.includes(key) ? 'checked' : ''}> ${esc(meta.permissions[key] || key)} <span class="muted mono" style="font-size:11px">${esc(key)}</span></label>`).join('');
+  }
+
+  function selectedPerms(md, container) {
+    return [...md.querySelectorAll(`${container} input[type="checkbox"]:checked`)].map((cb) => cb.value);
+  }
+
+  function bindRoleToggle(md, roleSelector, permSelector, initial) {
+    const roleEl = md.querySelector(roleSelector);
+    const boxes = [...md.querySelectorAll(`${permSelector} input[type="checkbox"]`)];
+    let remembered = initial.slice();
+    roleEl.addEventListener('change', () => {
+      if (roleEl.value === 'admin') {
+        remembered = selectedPerms(md, permSelector);
+        boxes.forEach((cb) => { cb.checked = true; cb.disabled = true; });
+      } else {
+        boxes.forEach((cb) => { cb.checked = remembered.includes(cb.value); cb.disabled = false; });
+      }
+    });
+    if (roleEl.value === 'admin') boxes.forEach((cb) => { cb.checked = true; cb.disabled = true; });
+  }
+
+  async function openCreate() {
+    if (!meta.allPermissions.length) await load();
+    const md = modal({
+      title: 'Tambah Akun Linux',
+      wide: true,
+      body: `
+        <div class="field"><label>Username</label><input class="input" id="ma-name" placeholder="contoh: budi" autocomplete="off"></div>
+        <div class="field"><label>Nama lengkap (opsional)</label><input class="input" id="ma-gecos" placeholder="contoh: Budi Santoso"></div>
+        <div class="field"><label>Shell</label><input class="input" id="ma-shell" value="/bin/bash"></div>
+        <div class="field"><label>Home directory (opsional)</label><input class="input" id="ma-home" placeholder="kosongkan = otomatis /home/username"></div>
+        <div class="field"><label>Role</label><select class="select" id="ma-role">${roleOptions('user')}</select></div>
+        <div class="field"><label>Izin akses fitur</label>
+          <div id="ma-perms" style="max-height:190px;overflow:auto;border:1px solid var(--border);border-radius:8px;padding:8px">${permCheckboxes(defaultPerms)}</div>
+          <p class="muted" style="font-size:12px;margin:6px 0 0">Centang fitur yang boleh diakses user. Role <strong>admin</strong> otomatis mendapat semua izin.</p>
+        </div>
+        <div class="field"><label>Password (minimal 8 karakter)</label><input class="input" id="ma-pass" type="password" autocomplete="new-password"></div>
+        <div class="field"><label>Konfirmasi password</label><input class="input" id="ma-pass2" type="password" autocomplete="new-password"></div>
+        <p class="muted" style="font-size:12px;margin:0">Akun dibuat sebagai user biasa (tanpa sudo) dengan home directory sendiri.</p>`,
+      footer: `<button class="btn" id="ma-cancel">Batal</button><button class="btn btn-primary" id="ma-save">Buat</button>`,
+    });
+    bindRoleToggle(md, '#ma-role', '#ma-perms', defaultPerms);
+    $('#ma-cancel', md).addEventListener('click', closeModal);
+    $('#ma-save', md).addEventListener('click', async () => {
+      const name = $('#ma-name', md).value.trim();
+      const pass = $('#ma-pass', md).value;
+      if (!name) return toast('Username wajib diisi', 'error');
+      if (!/^[a-z_][a-z0-9_-]{0,31}$/i.test(name)) return toast('Format username tidak valid', 'error');
+      if (pass.length < 8) return toast('Password minimal 8 karakter', 'error');
+      if (pass !== $('#ma-pass2', md).value) return toast('Konfirmasi password tidak cocok', 'error');
+      const payload = {
+        name,
+        gecos: $('#ma-gecos', md).value.trim(),
+        shell: $('#ma-shell', md).value.trim() || '/bin/bash',
+        role: $('#ma-role', md).value,
+        permissions: selectedPerms(md, '#ma-perms'),
+        password: pass,
+      };
+      const home = $('#ma-home', md).value.trim();
+      if (home) payload.home = home;
+      $('#ma-save', md).disabled = true;
+      try {
+        await api('/api/accounts', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
+        closeModal(); toast(`Akun "${name}" berhasil dibuat`); load();
+      } catch (e) { toast(e.message, 'error'); $('#ma-save', md).disabled = false; }
+    });
+  }
+
+  async function openEdit(name) {
+    let data;
+    try { data = await api('/api/accounts'); }
+    catch (e) { return toast(e.message, 'error'); }
+    meta = {
+      roles: data.roles || meta.roles,
+      permissions: data.permissions || meta.permissions,
+      allPermissions: data.allPermissions || Object.keys(data.permissions || meta.permissions),
+    };
+    const u = data.users.find((x) => x.name === name);
+    if (!u) return toast('Akun tidak ditemukan', 'error');
+
+    const md = modal({
+      title: `Edit akun · ${esc(name)}`,
+      wide: true,
+      body: `
+        <div class="field"><label>Nama lengkap</label><input class="input" id="ma-e-gecos" value="${esc(u.gecos)}"></div>
+        <div class="field"><label>Shell</label><input class="input" id="ma-e-shell" value="${esc(u.shell)}"></div>
+        <div class="field"><label>Home directory</label><input class="input" id="ma-e-home" value="${esc(u.home)}"></div>
+        <div class="field"><label>Role</label><select class="select" id="ma-e-role">${roleOptions(u.role || 'user')}</select></div>
+        <div class="field"><label>Izin akses fitur</label>
+          <div id="ma-e-perms" style="max-height:190px;overflow:auto;border:1px solid var(--border);border-radius:8px;padding:8px">${permCheckboxes(u.permissions || [])}</div>
+          <p class="muted" style="font-size:12px;margin:6px 0 0">Centang fitur yang boleh diakses user. Role <strong>admin</strong> otomatis mendapat semua izin.</p>
+        </div>
+        <div class="field"><label>Password baru (kosongkan jika tidak diubah)</label><input class="input" id="ma-e-pass" type="password" autocomplete="new-password"></div>`,
+      footer: `<button class="btn" id="ma-e-cancel">Batal</button><button class="btn btn-primary" id="ma-e-save">Simpan</button>`,
+    });
+    bindRoleToggle(md, '#ma-e-role', '#ma-e-perms', (u.permissions || []).length ? u.permissions : defaultPerms);
+    $('#ma-e-cancel', md).addEventListener('click', closeModal);
+    $('#ma-e-save', md).addEventListener('click', async () => {
+      const payload = {};
+      const gecos = $('#ma-e-gecos', md).value.trim();
+      if (gecos !== u.gecos) payload.gecos = gecos;
+      const shell = $('#ma-e-shell', md).value.trim();
+      if (shell && shell !== u.shell) payload.shell = shell;
+      const home = $('#ma-e-home', md).value.trim();
+      if (home && home !== u.home) payload.home = home;
+      payload.role = $('#ma-e-role', md).value;
+      payload.permissions = selectedPerms(md, '#ma-e-perms');
+      const pass = $('#ma-e-pass', md).value;
+      if (pass) payload.password = pass;
+      if (!Object.keys(payload).length) { closeModal(); return; }
+      $('#ma-e-save', md).disabled = true;
+      try {
+        await api(`/api/accounts/${encodeURIComponent(name)}`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
+        closeModal(); toast('Akun diperbarui'); load();
+      } catch (e) { toast(e.message, 'error'); $('#ma-e-save', md).disabled = false; }
+    });
+  }
+
+  async function act(btn) {
+    const name = btn.dataset.n;
+    if (btn.dataset.ma === 'edit') return openEdit(name);
+
+    if (btn.dataset.ma === 'lock') {
+      const lockIt = btn.dataset.lock !== '1';
+      btn.disabled = true;
+      try {
+        await api(`/api/accounts/${encodeURIComponent(name)}`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ locked: lockIt }) });
+        toast(`Akun "${name}" ${lockIt ? 'dikunci' : 'dibuka'}`); load();
+      } catch (e) { toast(e.message, 'error'); btn.disabled = false; }
+      return;
+    }
+
+    if (btn.dataset.ma === 'del') {
+      const md = modal({
+        title: 'Hapus akun',
+        body: `<p style="margin:0 0 10px">Hapus akun <b>${esc(name)}</b>? Tindakan ini tidak dapat dibatalkan.</p>
+          <div class="field"><label class="checkline"><input type="checkbox" id="ma-del-home"> Hapus juga home directory &amp; isinya</label></div>`,
+        footer: `<button class="btn" id="ma-del-cancel">Batal</button><button class="btn btn-danger" id="ma-del-ok">Hapus</button>`,
+      });
+      $('#ma-del-cancel', md).addEventListener('click', closeModal);
+      $('#ma-del-ok', md).addEventListener('click', async () => {
+        const rmHome = $('#ma-del-home', md).checked;
+        $('#ma-del-ok', md).disabled = true;
+        try {
+          await api(`/api/accounts/${encodeURIComponent(name)}${rmHome ? '?removeHome=1' : ''}`, { method: 'DELETE' });
+          closeModal(); toast(`Akun "${name}" dihapus`); load();
+        } catch (e) { toast(e.message, 'error'); $('#ma-del-ok', md).disabled = false; }
+      });
+    }
+  }
+
+  $('#ma-new').addEventListener('click', openCreate);
+  $('#ma-refresh').addEventListener('click', load);
+  load();
+}
+
 /* ============ PANEL ACCOUNTS (CRUD + role & permission) ============ */
 async function renderPanelAccounts(el) {
   if (!ME || !ME.permissions || !ME.permissions.includes('account')) {
@@ -2055,7 +2279,7 @@ async function renderPanelAccounts(el) {
       $('#ea-save').addEventListener('click', async () => {
         const role = $('#ea-role').value;
         const checked = [...md.querySelectorAll('#ea-perms input[type="checkbox"]:checked')].map((cb) => cb.value);
-        const payload = { role, fullName: $('#ea-fullname').value, active: $('#ea-active').checked, permissions: isAdminRole ? [] : checked };
+        const payload = { role, fullName: $('#ea-fullname').value, active: $('#ea-active').checked, permissions: role === 'admin' ? [] : checked };
         if ($('#ea-pass').value) payload.password = $('#ea-pass').value;
         try {
           await api(`/api/panel-accounts/${encodeURIComponent(a.username)}`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
@@ -2099,7 +2323,7 @@ async function renderPanelAccounts(el) {
         role,
         fullName: $('#na-fullname').value,
         active: $('#na-active').checked,
-        permissions: isAdminRole ? [] : checked,
+        permissions: role === 'admin' ? [] : checked,
       };
       if (!payload.username) return toast('Username wajib diisi', 'error');
       if (!/^[a-z_][a-z0-9_.-]{0,63}$/i.test(payload.username)) return toast('Format username tidak valid', 'error');
@@ -2144,12 +2368,8 @@ async function renderServices(el) {
 
   const tb = $('#svc-table');
   const canManage = !!ME?.isAdmin;
-  const protectedServices = data.policy?.protectedServices || [];
   function manageNote() {
     const notes = [];
-    if (protectedServices.length) {
-      notes.push(`Layanan <b>${protectedServices.map((p) => esc(p)).join(', ')}</b> dikelola eksklusif oleh dosen/pembicara — aksi start/stop/restart dinonaktifkan (status tetap bisa dipantau).`);
-    }
     if (!canManage) {
       notes.push('Aksi start/stop/restart hanya untuk administrator (akun dengan akses sudo). Anda hanya bisa memantau status.');
     } else if (!data.manageable) {
@@ -2176,7 +2396,7 @@ async function renderServices(el) {
               <button class="btn btn-sm btn-primary" data-do="start" data-id="${esc(s.name)}" ${s.state === 'running' ? 'disabled' : ''}>${SI.play} Start</button>
               <button class="btn btn-sm" data-do="stop" data-id="${esc(s.name)}" ${s.state !== 'running' ? 'disabled' : ''}>${SI.stop} Stop</button>
               <button class="btn btn-sm" data-do="restart" data-id="${esc(s.name)}">${SI.restart} Restart</button>` : ''}
-              ${prot ? `<span class="badge" title="Dikelola eksklusif oleh dosen/pembicara — aksi start/stop/restart dinonaktifkan">dikelola dosen</span>` : ''}
+              ${prot ? `<span class="badge" title="Aksi tidak tersedia">read-only</span>` : ''}
               <button class="btn btn-sm" data-do="status" data-id="${esc(s.name)}">${SI.info} Detail</button>
             </td>
           </tr>`;
@@ -2237,6 +2457,11 @@ const SI = {
   plus: `<svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14M12 5v14"/></svg>`,
 };
 
+function ownerOptions(owners, selected) {
+  return `<option value="">— belum ditetapkan —</option>` + (owners || []).map((u) =>
+    `<option value="${esc(u.username)}"${u.username === selected ? ' selected' : ''}>${esc(u.username)}${u.fullName ? ` (${esc(u.fullName)})` : ''}</option>`).join('');
+}
+
 async function renderSites(el) {
   el.innerHTML = `<div class="card"><div class="empty"><span class="spinner"></span>&nbsp; Memuat websites...</div></div>`;
   let data;
@@ -2244,6 +2469,7 @@ async function renderSites(el) {
   catch (e) { el.innerHTML = `<div class="card"><div class="empty">${esc(e.message)}</div></div>`; return; }
 
   const mutationsLocked = !!data.mutationsLocked;
+  const canAddSite = !!ME?.isAdmin || (ME?.permissions || []).includes('sites');
   el.innerHTML = `
     <div class="grid grid-kpi">
       <div class="card"><div class="card-body"><div class="kpi-label"><span class="kpi-icon">${SI.globe}</span>Nginx</div>
@@ -2259,7 +2485,7 @@ async function renderSites(el) {
 
     <div class="card">
       <div class="card-header"><span class="card-title">${SI.globe} Websites</span>
-        ${ME?.isAdmin && !mutationsLocked ? `<button class="btn btn-sm btn-primary" id="site-add">${SI.plus} Website Baru</button>` : ''}
+        ${canAddSite ? `<button class="btn btn-sm btn-primary" id="site-add" ${mutationsLocked ? 'disabled' : ''}>${SI.plus} Website Baru</button>` : ''}
       </div>
       <div class="card-body borderless-rows" style="padding:0">
         ${sitesTable(data.sites)}
@@ -2271,10 +2497,11 @@ async function renderSites(el) {
       <div class="card-body borderless-rows" style="padding:0">
         ${data.webDirs.length === 0 ? `<div class="empty">Belum ada folder di /var/www</div>` :
         `<table>
-          <thead><tr><th>Folder</th><th>Git</th><th>Branch</th><th style="width:210px">Aksi</th></tr></thead>
+          <thead><tr><th>Folder</th><th>Pemilik</th><th>Git</th><th>Branch</th><th style="width:210px">Aksi</th></tr></thead>
           <tbody>
             ${data.webDirs.map((w) => `<tr>
               <td><a href="#/site/${esc(w.name)}" style="color:inherit;text-decoration:none;font-weight:500" class="mono">${esc(w.name)}</a></td>
+              <td class="mono">${esc(w.owner || '—')}</td>
               <td class="mono muted" style="max-width:260px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${esc(w.gitUrl || '')}">${w.hasGit ? esc(w.gitUrl || 'origin tidak ada') : '—'}</td>
               <td class="mono">${esc(w.branch || '—')}</td>
               <td class="actions-cell">
@@ -2288,7 +2515,19 @@ async function renderSites(el) {
     </div>`;
 
   const addBtn = $('#site-add');
-  if (addBtn) addBtn.addEventListener('click', showAddSite);
+  if (addBtn) addBtn.addEventListener('click', () => showAddSite(data.assignableUsers || []));
+
+  $$('select[data-owner-for]').forEach((sel) => sel.addEventListener('change', async () => {
+    try {
+      await api('/api/sites/owner', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name: sel.dataset.ownerFor, owner: sel.value }),
+      });
+      toast('Pemilik situs diperbarui');
+      renderSites(el);
+    } catch (e) { toast(e.message, 'error'); }
+  }));
 
   $$('button[data-delconf]').forEach((b) => b.addEventListener('click', async () => {
     if (!confirm(`Hapus konfigurasi "${b.dataset.delconf}"?`)) return;
@@ -2312,7 +2551,7 @@ async function renderSites(el) {
   function sitesTable(sites) {
     if (sites.length === 0) return `<div class="empty">Belum ada server block nginx</div>`;
     return `<table>
-        <thead><tr><th>File</th><th>Server name</th><th>Docroot</th><th>Listen</th><th>Status</th><th style="width:210px">Aksi</th></tr></thead>
+        <thead><tr><th>File</th><th>Server name</th><th>Docroot</th><th>Listen</th><th>Status</th><th>Pemilik</th><th style="width:210px">Aksi</th></tr></thead>
         <tbody>
           ${sites.map((s) => {
             const name = s.filename;
@@ -2322,6 +2561,9 @@ async function renderSites(el) {
             <td class="mono muted" style="max-width:220px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(s.root || '-')}</td>
             <td class="mono muted">${esc(s.listen || '-')}</td>
             <td><span class="badge ${s.enabled ? 'badge-success' : ''}">${s.enabled ? 'enabled' : 'disabled'}</span></td>
+            <td class="mono">
+              ${ME?.isAdmin ? `<select class="input" style="padding:4px 6px" data-owner-for="${esc(name)}">${ownerOptions(data.assignableUsers, s.owner)}</select>` : esc(s.owner || '—')}
+            </td>
             <td class="actions-cell">
               <a class="btn btn-sm btn-primary" href="#/site/${esc(name)}">${SI.info} Detail</a>
               ${ME?.isAdmin && !mutationsLocked ? `<button class="btn btn-sm btn-danger" data-delconf="${esc(s.file)}">${SI.trash} Hapus conf</button>` : ''}
@@ -2359,7 +2601,7 @@ function deleteSite(name, onDone) {
   });
 }
 
-function showAddSite() {
+function showAddSite(owners = []) {
   const md = modal({
     title: 'Website Baru',
     body: `
@@ -2369,6 +2611,7 @@ function showAddSite() {
       <div class="field"><label>Branch</label><input class="input mono" id="site-branch" placeholder="main" value="main"></div>
       <div class="field"><label>Port listen</label><input class="input mono" id="site-port" placeholder="80" value="80"></div>
       <div class="field"><label>Docroot kustom (opsional)</label><input class="input mono" id="site-root" placeholder="/var/www/<nama>"></div>
+      ${ME?.isAdmin ? `<div class="field"><label>Pemilik situs</label><select class="input" id="site-owner">${ownerOptions(owners, ME?.username)}</select></div>` : `<div class="field"><label>Pemilik situs</label><div class="muted">${esc(ME?.username || '-')} (akun Anda)</div></div>`}
     `,
     footer: `<button class="btn" onclick="closeModal()">Batal</button><button class="btn btn-primary" id="site-go">Tambah</button>`,
   });
@@ -2386,7 +2629,7 @@ function showAddSite() {
       const r = await api('/api/sites/create', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ name, serverName: domain, gitUrl, branch, port, root: docroot }),
+        body: JSON.stringify({ name, serverName: domain, gitUrl, branch, port, root: docroot, owner: ME?.isAdmin ? $('#site-owner').value : ME?.username }),
       });
       closeModal();
       toast(`Website "${r.name}" berhasil dibuat — lanjut ke konfigurasi`);
@@ -2476,8 +2719,10 @@ async function renderSiteDetail(el, name, tab) {
           <dt>Server name</dt><dd>${esc(site?.serverName || '-')}</dd>
           <dt>Docroot</dt><dd>${esc(docroot())}</dd>
           <dt>Listen</dt><dd>${esc(site?.listen || '-')}</dd>
-          <dt>Status konfig</dt><dd>${site ? (site.enabled ? 'enabled' : 'disabled') : 'tanpa server block'}</dd>
-          <dt>Git</dt><dd>${dir?.hasGit ? `${esc(dir.gitUrl || '-')} (${esc(dir.branch || '')})` : 'tidak ada'}</dd>
+           <dt>Status konfig</dt><dd>${site ? (site.enabled ? 'enabled' : 'disabled') : 'tanpa server block'}</dd>
+           <dt>Pemilik</dt><dd>${esc(site?.owner || dir?.owner || '—')}</dd>
+           <dt>Git</dt><dd>${dir?.hasGit ? `${esc(dir.gitUrl || '-')} (${esc(dir.branch || '')})` : 'tidak ada'}</dd>
+
         </dl></div></div>
         <div class="card"><div class="card-header"><span class="card-title">Aksi Cepat</span></div><div class="card-body" style="display:flex;flex-direction:column;gap:10px">
           <button class="btn" data-goto="files">📝 Kelola file website</button>
@@ -2589,7 +2834,6 @@ async function renderSiteDetail(el, name, tab) {
           <div style="display:flex;gap:8px">
             ${ME?.isAdmin && !data.mutationsLocked ? `<button class="btn btn-sm" id="cfg-nginx-test">Test Config</button>
             <button class="btn btn-sm btn-primary" id="cfg-save">Simpan & Reload</button>` : ''}
-            ${ME?.isAdmin && data.mutationsLocked ? `<span class="muted" style="align-self:center;font-size:12px">Konfigurasi terkunci — dikelola eksklusif oleh dosen/pembicara.</span>` : ''}
           </div>
         </div>
         <div class="card-body">
@@ -2647,14 +2891,11 @@ async function renderSiteDetail(el, name, tab) {
               <dt>Berlaku hingga</dt><dd>${esc(info.notAfter || '-')} <span class="muted">(${info.daysLeft} hari lagi)</span></dd>
               <dt>Lokasi</dt><dd>${esc(info.dir || '-')}</dd>
             </dl>
-            <div style="margin-top:14px;display:flex;gap:8px">
-              <span class="muted" style="align-self:center">Dikelola eksklusif oleh dosen/pembicara — perpanjangan via certbot hanya oleh petugas berwenang.</span>
-            </div>
-          ` : `
-              <div class="empty">
-                Belum ada sertifikat SSL untuk <b>${esc(domain)}</b>.
-                <div class="muted" style="font-size:12px;margin-top:8px">Penerbitan/perpanjangan SSL dikelola eksklusif oleh dosen/pembicara.</div>
-              </div>
+           ` : `
+               <div class="empty">
+                 Belum ada sertifikat SSL untuk <b>${esc(domain)}</b>.
+               </div>
+
           `}
         </div>
       </div>`;
@@ -3222,8 +3463,16 @@ const ROUTES = {
   database: { title: 'Database', render: renderDashboard }, /* di-handle custom di navigate() */
   terminal: { title: 'Web Terminal', render: renderTerminal },
   account: { title: 'Akun Saya', render: renderAccount },
-  akun: { title: 'Manajemen Akun', render: renderPanelAccounts },
+  akun: { title: 'Manajemen Akun', render: renderManageAccounts },
 };
+
+function denyPage(title) {
+  stopDashboardRefresh();
+  terminalCleanup('');
+  $('#page-title').textContent = title;
+  $$('.nav-item').forEach((a) => a.classList.remove('active'));
+  $('#page-content').innerHTML = `<div class="card"><div class="empty">Anda tidak memiliki izin untuk mengakses ${esc(title)}.</div></div>`;
+}
 
 function navigate() {
   const hash = location.hash.replace(/^#\/?/, '') || 'dashboard';
@@ -3231,7 +3480,18 @@ function navigate() {
   let page = parts[0] || 'dashboard';
   closeModal();
 
+  const perms = ME ? (ME.permissions || []) : [];
+  $$('.nav-item').forEach((a) => {
+    const perm = a.dataset.perm;
+    a.style.display = (perm && !perms.includes(perm)) ? 'none' : '';
+  });
+  if (page === 'dashboard' && !perms.includes('dashboard')) {
+    const allowed = $$('.nav-item').find((a) => a.dataset.perm && perms.includes(a.dataset.perm));
+    if (allowed) page = allowed.dataset.page;
+  }
+
   if (page === 'site' && parts[1]) {
+    if (!perms.includes('sites')) return denyPage('Daftar Situs');
     const name = decodeURIComponent(parts[1]);
     const tab = parts[2] || 'overview';
     $('#page-title').textContent = `Website: ${name}`;
@@ -3242,6 +3502,7 @@ function navigate() {
 
   if (page === 'db' || (page === 'database' && parts.length > 1)) {
     // #/database | #/database/svc | #/db/svc/db/table
+    if (!perms.includes('database')) return denyPage('Database');
     const sub = parts.slice(1).map(decodeURIComponent);
     $('#page-title').textContent = 'Database';
     $$('.nav-item').forEach((a) => a.classList.toggle('active', a.dataset.page === 'database'));
@@ -3252,14 +3513,12 @@ function navigate() {
   if (!ROUTES[page]) page = 'dashboard';
   terminalCleanup(page);
   const route = ROUTES[page];
+  const navItem = $$('.nav-item').find((a) => a.dataset.page === page);
+  if (navItem && navItem.dataset.perm && !perms.includes(navItem.dataset.perm)) {
+    return denyPage(route.title);
+  }
   $('#page-title').textContent = route.title;
   $$('.nav-item').forEach((a) => a.classList.toggle('active', a.dataset.page === page));
-  // Sembunyikan menu yang tidak diizinkan untuk role/user login ini.
-  const perms = ME ? (ME.permissions || []) : [];
-  $$('.nav-item').forEach((a) => {
-    const perm = a.dataset.perm;
-    a.style.display = (perm && !perms.includes(perm)) ? 'none' : '';
-  });
   stopDashboardRefresh();
   if (page === 'dashboard') {
     route.render($('#page-content'));

@@ -5,6 +5,7 @@ const path = require('path');
 const { execFile } = require('child_process');
 const auth = require('../auth');
 const policy = require('../policy');
+const ownership = require('../site-ownership');
 
 const router = express.Router();
 
@@ -46,32 +47,24 @@ function isWebDirSafe(dir) {
   return typeof dir === 'string' && path.resolve(dir).startsWith(WEB_ROOT + '/');
 }
 
-/**
- * Kebijakan "Pengelolaan Services (Khusus)": mutasi vhost nginx (create/edit/
- * toggle/delete) dan reload nginx terkunci — peserta wajib koordinasi ke dosen/
- * pembicara. Buka dengan PANEL_ALLOW_NGINX_MUTATIONS=1 bila diperlukan.
- * Mengembalikan true bila request sudah ditolak (res sudah dikirim).
- */
 function guardNginxMutation(req, res) {
   if (policy.NGINX_MUTATIONS_ALLOWED) return false;
   res.status(403).json({
     error: policy.COORDINATION_MESSAGE,
     policy: 'nginx-mutations-locked',
-    hint: 'Set PANEL_ALLOW_NGINX_MUTATIONS=1 untuk membuka mutasi vhost (koordinasikan ke dosen/pembicara).',
   });
   return true;
 }
 
-/* ---------- baca (semua user login) ---------- */
-
-router.get('/', async (req, res) => {
+/** Kumpulkan seluruh vhost beserta pemiliknya (dipakai untuk filter & cek akses). */
+function collectSites() {
   const sitesDir = findSitesDir();
   const enabled = new Set();
   if (fs.existsSync(NGINX_SITES_ENABLED)) {
     for (const f of fs.readdirSync(NGINX_SITES_ENABLED)) enabled.add(f);
   }
 
-  let sites = {};
+  const sites = {};
   if (sitesDir) {
     for (const f of fs.readdirSync(sitesDir)) {
       const abs = path.join(sitesDir, f);
@@ -80,16 +73,55 @@ router.get('/', async (req, res) => {
       const rootMatch = content.match(/root\s+([^;]+);/);
       const serverName = content.match(/server_name\s+([^;]+);/);
       const listen = content.match(/listen\s+([^;]+);/);
-      sites[path.join(sitesDir, f)] = {
+      const root = rootMatch ? rootMatch[1].trim() : null;
+      sites[abs] = {
         filename: f,
-        file: path.join(sitesDir, f),
+        file: abs,
         enabled: enabled.has(f) || enabled.has(path.basename(f)),
-        root: rootMatch ? rootMatch[1].trim() : null,
+        root,
         serverName: serverName ? serverName[1].trim() : null,
-        listen: listen ? listen[1].trim() : null
+        listen: listen ? listen[1].trim() : null,
+        owner: ownership.resolveOwner({ name: f, root, content })
       };
     }
   }
+  return { sitesDir, sites: Object.values(sites) };
+}
+
+function siteForFile(file) {
+  if (!file || !isNginxConfAllowed(file)) return null;
+  return collectSites().sites.find((s) => s.file === file) || null;
+}
+
+function siteForDir(dir) {
+  if (!isWebDirSafe(dir)) return null;
+  const target = path.resolve(dir);
+  return collectSites().sites.find((s) => s.root && path.resolve(s.root) === target) || null;
+}
+
+function canAccessSite(req, res, site) {
+  if (ownership.canAccess(req, site && site.owner)) return true;
+  res.status(403).json({ error: 'Akses ditolak: situs ini bukan milik Anda' });
+  return false;
+}
+
+function canAccessDir(req, res, dir) {
+  if (req.isAdmin) return true;
+  const site = siteForDir(dir);
+  const owner = site ? site.owner : ownership.resolveOwner({ name: path.basename(dir), root: dir });
+  return canAccessSite(req, res, { owner });
+}
+
+function ownerForDir(dir, sites) {
+  const match = sites.find((s) => s.root && path.resolve(s.root) === path.resolve(dir));
+  return match ? match.owner : ownership.resolveOwner({ name: path.basename(dir), root: dir });
+}
+
+/* ---------- baca (semua user login, hanya situs milik sendiri) ---------- */
+
+router.get('/', async (req, res) => {
+  const { sitesDir, sites: allSites } = collectSites();
+  const sites = allSites.filter((s) => ownership.canAccess(req, s.owner));
 
   let webDirs = [];
   if (fs.existsSync(WEB_ROOT)) {
@@ -100,6 +132,7 @@ router.get('/', async (req, res) => {
       size: null
     }));
     for (const dir of webDirs) {
+      dir.owner = ownerForDir(dir.path, allSites);
       try {
         const st = await fsp.stat(dir.path);
         dir.created = st.birthtime;
@@ -111,17 +144,29 @@ router.get('/', async (req, res) => {
         dir.branch = branch.stdout ? branch.stdout.trim() : null;
       }
     }
+    webDirs = webDirs.filter((d) => ownership.canAccess(req, d.owner));
   }
 
   const nginxCheck = await run('systemctl', ['is-active', 'nginx']);
   res.json({
     nginxActive: nginxCheck.stdout.trim() === 'active',
     nginxSitesDir: sitesDir,
-    sites: Object.values(sites),
+    sites,
     webDirs,
+    ownUsername: req.user,
+    assignableUsers: req.isAdmin ? ownership.listUsers() : [],
     mutationsLocked: !policy.NGINX_MUTATIONS_ALLOWED,
     policy: policy.policySummary()
   });
+});
+
+router.post('/owner', auth.requireAdmin, (req, res) => {
+  const { name, owner } = req.body || {};
+  const site = collectSites().sites.find((s) => s.filename === String(name || ''));
+  if (!site) return res.status(404).json({ error: 'Situs tidak ditemukan' });
+  const result = ownership.setOwner(site.filename, owner);
+  if (!result.ok) return res.status(400).json({ error: result.error });
+  res.json({ ok: true, name: site.filename, owner: result.owner });
 });
 
 router.get('/git-info', async (req, res) => {
@@ -129,6 +174,7 @@ router.get('/git-info', async (req, res) => {
   if (!isWebDirSafe(dir) || !fs.existsSync(path.join(dir, '.git'))) {
     return res.json({ hasGit: false });
   }
+  if (!canAccessDir(req, res, dir)) return;
   const [remote, branch, log, status] = await Promise.all([
     run('git', ['-C', dir, 'remote', 'get-url', 'origin'], { timeout: 10000 }),
     run('git', ['-C', dir, 'rev-parse', '--abbrev-ref', 'HEAD'], { timeout: 10000 }),
@@ -148,6 +194,7 @@ router.get('/config', async (req, res) => {
   try {
     const file = req.query.file;
     if (!file || !isNginxConfAllowed(file) || !fs.existsSync(file)) throw new Error('invalid');
+    if (!canAccessSite(req, res, siteForFile(file))) return;
     res.json({ file, content: fs.readFileSync(file, 'utf8') });
   } catch (err) {
     res.status(400).json({ error: 'File tidak ditemukan' });
@@ -207,6 +254,7 @@ router.post('/config', auth.requireAdmin, async (req, res) => {
 router.post('/git-pull', auth.requireAdmin, async (req, res) => {
   const { dir } = req.body;
   if (!isWebDirSafe(dir) || !fs.existsSync(dir + '/.git')) return res.status(400).json({ error: 'Direktori bukan repo git' });
+  if (!canAccessDir(req, res, dir)) return;
   const pull = await run('git', ['-C', dir, 'pull'], { timeout: 300000 });
   res.json({
     ok: pull.code === 0,
@@ -255,12 +303,21 @@ router.post('/git-clone', auth.requireAdmin, async (req, res) => {
   res.json({ ok: true, output: ('Repo terhubung dari folder existing: ' + (fetch.stdout + fetch.stderr).trim().slice(0, 300)) });
 });
 
-router.post('/create', auth.requireAdmin, async (req, res) => {
+router.post('/create', auth.requirePermission('sites'), async (req, res) => {
   if (guardNginxMutation(req, res)) return;
-  const { name, serverName, gitUrl, branch, port, root } = req.body;
+  const isAdmin = !!req.isAdmin;
+  const { name, serverName, gitUrl, branch, port, root, owner } = req.body;
   if (!name || !/^[a-zA-Z0-9._-]+$/.test(name)) {
     return res.status(400).json({ error: 'Nama website tidak valid (a-z, 0-9, ., _, -)' });
   }
+  if (!isAdmin && owner && owner !== req.user) {
+    return res.status(403).json({ error: 'Akses ditolak: pemilik situs harus akun sendiri' });
+  }
+  const requestedOwner = isAdmin ? owner : req.user;
+  if (requestedOwner && !ownership.isKnownUser(requestedOwner)) {
+    return res.status(400).json({ error: 'Pemilik tidak dikenal' });
+  }
+  const ownerName = requestedOwner || (ownership.isKnownUser(req.user) ? req.user : null);
   if (port && !/^\d{1,5}$/.test(String(port))) {
     return res.status(400).json({ error: 'Port tidak valid' });
   }
@@ -274,7 +331,13 @@ router.post('/create', auth.requireAdmin, async (req, res) => {
   if (root && !path.isAbsolute(root)) {
     return res.status(400).json({ error: 'Docroot harus path absolut' });
   }
-  const docroot = root || path.join(WEB_ROOT, name);
+  if (!isAdmin && root) {
+    const ownRoot = path.resolve(WEB_ROOT, String(req.user));
+    if (!path.resolve(root).startsWith(ownRoot + path.sep)) {
+      return res.status(400).json({ error: 'Docroot harus di dalam /var/www/<akun-anda>' });
+    }
+  }
+  const docroot = root || path.join(WEB_ROOT, isAdmin ? name : String(req.user), name);
   let gitInfo = { configured: true, added: null };
 
   if (gitUrl) {
@@ -293,7 +356,7 @@ router.post('/create', auth.requireAdmin, async (req, res) => {
   }
 
   const listenPort = port || 80;
-  const conf = `server {
+  const conf = `${ownerName ? `# owner: ${ownerName}\n` : ''}server {
   listen ${listenPort};
   listen [::]:${listenPort};
   server_name ${serverName || `${name}.local`};
@@ -311,6 +374,7 @@ router.post('/create', auth.requireAdmin, async (req, res) => {
 }
 `;
   await fsp.writeFile(confFile, conf, 'utf8');
+  if (ownerName) ownership.setOwner(name, ownerName);
 
   if (fs.existsSync(NGINX_SITES_ENABLED)) {
     const link = path.join(NGINX_SITES_ENABLED, name);
@@ -330,6 +394,7 @@ router.post('/create', auth.requireAdmin, async (req, res) => {
   res.json({
     ok: true,
     name,
+    owner: ownerName,
     configFile: confFile,
     docroot,
     nginxReloaded: reload.code === 0,
@@ -345,6 +410,7 @@ router.post('/delete', auth.requireAdmin, async (req, res) => {
   if (file) {
     if (!isNginxConfAllowed(file)) return res.status(400).json({ error: 'File harus di direktori sites nginx' });
     if (fs.existsSync(file)) await fsp.unlink(file).catch(() => {});
+    ownership.setOwner(path.basename(file), null);
     results.configRemoved = true;
     const enabledLink = path.join(NGINX_SITES_ENABLED, path.basename(file));
     if (fs.existsSync(enabledLink)) {

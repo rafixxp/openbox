@@ -3,6 +3,7 @@ const pty = require('node-pty');
 const os = require('os');
 const fs = require('fs');
 const panelAccounts = require('./panel-accounts');
+const accountAccess = require('./account-access');
 
 const TTL = 7 * 24 * 3600 * 1000;
 const COOKIE = 'np_sid';
@@ -67,7 +68,7 @@ function linuxAuth(username, password) {
     return Promise.resolve({
       ok: false,
       reason: 'nologin',
-      error: 'Akun tidak dapat login (shell tidak aktif / nologin). Hubungi administrator.',
+      error: 'Akun tidak dapat login (shell tidak aktif / nologin).',
     });
   }
 
@@ -247,6 +248,16 @@ function requireAdmin(req, res, next) {
   next();
 }
 
+function refreshAccess(username) {
+  const access = accountAccess.resolveAccess(username, isAdminUser(username));
+  for (const s of sessions.values()) {
+    if (s.username !== username || s.panelAccount) continue;
+    s.role = access.role;
+    s.permissions = access.permissions;
+    s.isAdmin = access.isAdmin;
+  }
+}
+
 /* ---------- routes ---------- */
 
 const LOGIN_DELAY_MS = 400;
@@ -290,14 +301,16 @@ function routes(app) {
     recordSuccess(uname);
     const sid = crypto.randomBytes(24).toString('hex');
     const isPanel = !!panel;
-    const isAdmin = isPanel ? panel.role === 'admin' : isAdminUser(uname);
-    const role = isPanel ? panel.role : (isAdmin ? 'admin' : 'user');
-    const permissions = isPanel ? panel.permissions : (isAdmin ? panelAccounts.ALL_PERMISSIONS : panelAccounts.DEFAULT_USER_PERMS);
+    const access = isPanel ? null : accountAccess.resolveAccess(uname, isAdminUser(uname));
+    const isAdmin = isPanel ? panel.role === 'admin' : access.isAdmin;
+    const role = isPanel ? panel.role : access.role;
+    const permissions = isPanel ? panel.permissions : access.permissions;
     const session = {
       username: uname,
       role,
       permissions,
       isAdmin,
+      panelAccount: isPanel,
       exp: Date.now() + TTL,
     };
     sessions.set(sid, session);
@@ -360,14 +373,23 @@ function checkRequest(req) {
   return wsUser(req) !== null;
 }
 
+function wsCan(req, permission) {
+  const s = valid(sidFromReq(req));
+  if (!s) return false;
+  const perms = s.permissions || [];
+  return perms.includes('*') || perms.includes(permission);
+}
+
 module.exports = {
   middleware,
   requireAuth,
   requireAdmin,
+  refreshAccess,
   requirePermission: panelAccounts.requirePermission,
   routes,
   checkRequest,
   wsUser,
+  wsCan,
   isAdminUser,
   isValidName: (n) => NAME_RE.test(String(n || '')),
 };
